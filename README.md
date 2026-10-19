@@ -2,6 +2,17 @@
 
 一个小型 Agent 运行时：**编排、执行、能力三层分离**，并对不可信的模型输出提供有界恢复路径。
 
+> **一分钟验证**
+>
+> ```bash
+> pip install -e ".[dev]"
+> python examples/verify.py     # 46 项检查，无需 API key
+> pytest -q                     # 177 个测试
+> ```
+>
+> `verify.py` 逐项跑通工具循环、三类恢复路径、增量流式、跨协议转换、会话隔离、
+> 压缩、缓存成本模型与工具防护，并打印每项结果。失败时返回非零退出码。
+
 ```
 AgentLoop      面向渠道：会话、压缩、生命周期、并发隔离
 AgentRunner    面向模型：ReAct 循环与全部恢复路径
@@ -28,7 +39,8 @@ python examples/demo.py
 # 也可以切到 OpenAI 兼容系后端
 export VELA_BACKEND=deepseek DEEPSEEK_API_KEY=sk-... VELA_MODEL=deepseek-chat
 
-pytest -q          # 177 passed
+python examples/verify.py   # 46 checks, no API key needed
+pytest -q                     # 177 passed
 ```
 
 最小用法：
@@ -234,13 +246,15 @@ src/vela/
 │   ├── base.py          Provider 抽象 + 错误分类 + JSON 修复
 │   ├── factory.py       后端注册表与构造（按配置选择）
 │   ├── openai_compat.py OpenAI 兼容实现（含 SSE 流式重组）
-│   └── anthropic.py     Anthropic 原生协议 + 消息格式转换
+│   ├── anthropic.py     Anthropic 原生协议 + 消息格式转换
+│   ├── caching.py       缓存成本模型（盈亏平衡、命中核算）
+│   └── anthropic_cache.py  cache_control 断点规划
 └── tools/
     ├── base.py          Tool 基类 + schema 校验 + contextvar
     ├── registry.py      注册表 + 并发分发 + 名称纠错
     └── builtin.py       内置工具
 
-tests/                   102 个测试
+tests/                   177 个测试
 examples/demo.py端到端演示，无需 API key
 ```
 

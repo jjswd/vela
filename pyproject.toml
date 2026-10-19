@@ -1,12 +1,12 @@
 [project]
 name = "vela"
-version = "0.1.0"
+version = "0.3.0"
 description = "A small agent runtime with an explicit loop/runner split and bounded recovery paths"
 requires-python = ">=3.11"
 dependencies = ["httpx>=0.27"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6", "build>=1.2"]
 
 [build-system]
 requires = ["hatchling"]
@@ -22,3 +22,16 @@ pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Match the rules CI enforces so `ruff check` locally matches the pipeline.
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = [
+  "E501",   # long lines are handled by the formatter, not the linter
+  "SIM108", # ternaries are not always clearer
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately reach into private helpers to assert on internals.
+"tests/*" = ["B011"]

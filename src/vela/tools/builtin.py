@@ -53,13 +53,18 @@ class MathTool(Tool):
         expression = str(arguments["expression"])
         illegal = sorted(set(expression) - self._ALLOWED)
         if illegal:
-            return f"Unsupported characters: {''.join(illegal)}"
+            # Raising keeps the failure distinguishable from a result: returning
+            # this text as a normal answer would let the model read a rejected
+            # expression as a computed value.
+            raise ValueError(f"unsupported characters: {''.join(illegal)}")
         if not expression.strip():
-            return "Empty expression."
+            raise ValueError("empty expression")
         try:
             value = eval(expression, {"__builtins__": {}}, {})  # noqa: S307 - sanitized
         except Exception as exc:  # noqa: BLE001
-            return f"Cannot evaluate expression: {exc}"
+            # A failed evaluation yields no number, so reporting it as a normal
+            # result would hand the model text where it expects a value.
+            raise ValueError(f"cannot evaluate {expression!r}: {exc}") from exc
         return str(round(value, 10) if isinstance(value, float) else value)
 
 
