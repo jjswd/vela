@@ -1,6 +1,6 @@
 # Vela
 
-[![CI](https://github.com/YOUR_USERNAME/vela/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/vela/actions/workflows/ci.yml)
+[![CI](https://github.com/jjswd/vela/actions/workflows/ci.yml/badge.svg)](https://github.com/jjswd/vela/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Tests](https://img.shields.io/badge/tests-179%20passing-brightgreen)](./tests)
