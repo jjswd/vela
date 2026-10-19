@@ -17,7 +17,6 @@ from vela.core.contracts import ModelResponse, Usage
 from vela.providers.base import (
     GenerationConfig,
     Provider,
-    StreamEmitter,
     ToolSpec,
     classify_error,
     parse_openai_response,

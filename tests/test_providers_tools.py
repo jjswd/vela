@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from vela.core.contracts import ModelResponse, ToolCall, Usage
@@ -211,7 +209,7 @@ def test_boolean_is_not_accepted_as_integer() -> None:
 
 
 def test_schema_from_signature_infers_types() -> None:
-    def handler(name: str, count: int = 3, tags: list[str] = []) -> str:
+    def handler(name: str, count: int = 3, tags: list | None = None) -> str:
         return name
 
     schema = schema_from_signature(handler)
@@ -264,3 +262,43 @@ async def test_registry_returns_one_record_per_call() -> None:
     assert len(records) == 1
     assert records[0].result.call_id == "c1"
     assert "exceeded" in records[0].result.content
+
+
+def test_optional_annotations_infer_the_inner_type() -> None:
+    """``int | None`` is a number, not a string.
+
+    Optional parameters are the most common way tools are written, so inferring
+    ``"string"`` for every one of them would misdescribe most real schemas.
+    """
+    def handler(
+        count: int | None = None,
+        ratio: float | None = None,
+        flag: bool | None = None,
+        name: str | None = None,
+        tags: list[str] | None = None,
+        meta: dict | None = None,
+        legacy: int | None = None,
+    ) -> str:
+        return "ok"
+
+    schema = schema_from_signature(handler)
+    properties = schema["properties"]
+    assert properties["count"] == {"type": "integer"}
+    assert properties["ratio"] == {"type": "number"}
+    assert properties["flag"] == {"type": "boolean"}
+    assert properties["name"] == {"type": "string"}
+    assert properties["tags"] == {"type": "array"}
+    assert properties["meta"] == {"type": "object"}
+    # Optional[...], the pre-3.10 spelling, must behave the same.
+    assert properties["legacy"] == {"type": "integer"}
+
+
+def test_bare_annotations_infer_container_types() -> None:
+    def handler(items: list, mapping: dict, flag: bool, count: int) -> str:
+        return "ok"
+
+    schema = schema_from_signature(handler)
+    assert schema["properties"]["items"] == {"type": "array"}
+    assert schema["properties"]["mapping"] == {"type": "object"}
+    assert schema["properties"]["flag"] == {"type": "boolean"}
+    assert schema["properties"]["count"] == {"type": "integer"}

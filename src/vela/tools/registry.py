@@ -8,10 +8,8 @@ believing the action succeeded.
 from __future__ import annotations
 
 import asyncio
-import inspect
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
 
 from vela.core.contracts import ToolCall, ToolResult
 from vela.providers.base import ToolSpec
@@ -86,7 +84,10 @@ class ToolRegistry:
             results = [await self._run_one(call, timeout) for call in calls]
 
         records: list[DispatchRecord] = []
-        for call, outcome in zip(calls, results):
+        # strict=True: a length mismatch would mean a tool result was dropped,
+        # leaving an unmatched tool_call id in the transcript. Fail loudly
+        # instead of silently zipping the shorter list.
+        for call, outcome in zip(calls, results, strict=True):
             if isinstance(outcome, BaseException):
                 # A timeout or an internal crash still owes the model a tool
                 # message; omitting it would leave an unmatched tool_call id.
@@ -128,7 +129,7 @@ class ToolRegistry:
             if timeout is not None:
                 return await asyncio.wait_for(coro, timeout=timeout)
             return await coro
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return ToolResult(
                 call_id=call.id,
                 name=call.name,
@@ -173,7 +174,7 @@ def _within_one_edit(left: str, right: str) -> bool:
     if abs(len(left) - len(right)) > 1:
         return False
     if len(left) == len(right):
-        return sum(a != b for a, b in zip(left, right)) <= 1
+        return sum(a != b for a, b in zip(left, right, strict=True)) <= 1
 
     shorter, longer = (left, right) if len(left) < len(right) else (right, left)
     # The shorter string is a prefix of the longer one except at a single

@@ -372,7 +372,6 @@ def extract_usage(payload: dict[str, Any]) -> Usage:
 
 def parse_openai_response(payload: dict[str, Any]) -> ModelResponse:
     """Normalise an OpenAI-shaped chat completion into :class:`ModelResponse`."""
-    import time
 
     choices = payload.get("choices") or []
     if not choices:

@@ -17,9 +17,7 @@ import json
 from typing import Any
 
 import httpx
-import pytest
 
-from vela.core.contracts import ModelResponse, ToolCall, Usage
 from vela.providers.anthropic import AnthropicProvider
 from vela.providers.base import GenerationConfig, ToolSpec
 from vela.providers.openai_compat import OpenAICompatProvider

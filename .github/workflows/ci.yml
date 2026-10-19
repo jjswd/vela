@@ -40,6 +40,11 @@ jobs:
         # Guards against tests that only pass because of leftover state.
         run: PYTHONDONTWRITEBYTECODE=1 pytest -q
 
+      - name: Run the offline verification
+        # Proves the documented behaviour still holds, and that the package
+        # works from a clean checkout without any credentials.
+        run: python examples/verify.py
+
   lint:
     name: lint
     runs-on: ubuntu-latest
@@ -48,7 +53,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff && ruff check src tests
+      - run: pip install ruff
+      - run: ruff check src tests examples
 
   types:
     name: type check
@@ -81,15 +87,16 @@ jobs:
           pip install dist/*.whl
           python -c "import vela; print(vela.__version__); print(vela.available_providers())"
 
-  docs:
-    name: readme renders
+  demo:
+    name: quick start
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Run the offline demo
-        # Proves the documented quick start still works on a clean machine, with
-        # no API key and no network access.
+      - run: pip install -e ".[dev]"
+      - name: Run the quick-start demo
+        # Proves the documented entry point works on a clean machine, with no
+        # API key and no network access.
         run: python examples/demo.py

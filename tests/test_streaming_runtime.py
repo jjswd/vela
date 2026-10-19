@@ -8,8 +8,6 @@ to come, and that a caller who does not want deltas never pays for them.
 
 from __future__ import annotations
 
-from typing import Any
-
 from vela.core.contracts import ModelResponse, ToolCall, Usage
 from vela.core.loop import AgentLoop, SessionStore
 from vela.core.runner import AgentRunner, RunSpec, StopReason, StreamingEmitter
@@ -140,7 +138,7 @@ async def test_stream_is_not_closed_before_tool_work() -> None:
         ]
     )
     emitter = RecordingEmitter()
-    result = await AgentRunner(provider, registry()).run(
+    await AgentRunner(provider, registry()).run(
         RunSpec(messages=[{"role": "user", "content": "hi"}]), emitter=emitter
     )
 

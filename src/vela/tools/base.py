@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import inspect
 import json
+import types
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, get_origin, get_type_hints
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from vela.core.contracts import ToolResult
 
@@ -117,9 +118,12 @@ def _validate_value(path: str, schema: dict[str, Any], value: Any) -> list[str]:
         options = ", ".join(repr(item) for item in enum)
         errors.append(f"'{path}' must be one of [{options}], got {value!r}")
 
-    if isinstance(value, str) and (min_length := schema.get("minLength")):
-        if len(value) < min_length:
-            errors.append(f"'{path}' must be at least {min_length} characters")
+    if (
+        isinstance(value, str)
+        and (min_length := schema.get("minLength"))
+        and len(value) < min_length
+    ):
+        errors.append(f"'{path}' must be at least {min_length} characters")
 
     if isinstance(value, dict):
         nested = schema.get("properties") or {}
@@ -127,7 +131,7 @@ def _validate_value(path: str, schema: dict[str, Any], value: Any) -> list[str]:
             if name not in value:
                 errors.append(f"'{path}.{name}' is required")
         for name, item in value.items():
-            if name in nested:
+            if name in nested:  # unknown keys are reported at the top level
                 errors.extend(_validate_value(f"{path}.{name}", nested[name], item))
 
     if isinstance(value, list) and (items := schema.get("items")):
@@ -194,20 +198,45 @@ def schema_from_signature(func: Callable[..., Any]) -> dict[str, Any]:
 
 
 def _json_type_of(annotation: Any) -> str:
+    """Map a Python annotation onto a JSON Schema type name.
+
+    Optional parameters are the common case (``count: int | None``,
+    ``tags: list[str] | None``), so the ``None`` half of a union is discarded
+    before inspection. Without that, every optional parameter would fall through
+    to ``"string"`` and the model would be told to send a number as text.
+    """
     origin = get_origin(annotation)
+
+    # Union / X | None: use the first non-None member.
+    if origin is Union or origin is types.UnionType:
+        members = [member for member in get_args(annotation) if member is not type(None)]
+        if not members:
+            return "null"
+        if len(members) == 1:
+            return _json_type_of(members[0])
+        # A heterogeneous union has no single JSON type; "string" is the
+        # conservative choice because it accepts anything at validation time.
+        return "string"
+
     if origin is not None:
-        if origin in {list, tuple}:
+        if origin in {list, tuple, set}:
             return "array"
         if origin is dict:
             return "object"
         annotation = origin
-    for name, python_type in _JSON_TYPES.items():
-        if annotation is python_type or annotation is int and name == "integer":
-            return name
+
+    if annotation is bool:
+        # Checked before int: bool is a subclass of int, and a boolean
+        # parameter must not be advertised as a number.
+        return "boolean"
     if annotation is int:
         return "integer"
     if annotation is float:
         return "number"
+    if annotation is str:
+        return "string"
+    if annotation in {list, tuple, set, dict}:
+        return "array" if annotation in {list, tuple, set} else "object"
     return "string"
 
 

@@ -18,7 +18,6 @@ from typing import Any
 from vela.core.contracts import (
     ABNORMAL_FINISH_REASONS,
     ModelResponse,
-    ToolCall,
     ToolResult,
     Usage,
 )

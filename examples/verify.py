@@ -25,17 +25,16 @@ import httpx
 from vela import (
     AgentLoop,
     AgentRunner,
-    RunSpec,
     CachePolicy,
     CacheStats,
     CacheTTL,
     GenerationConfig,
     OpenAICompatProvider,
+    RunSpec,
     SessionStore,
     StreamingEmitter,
     Tool,
     ToolRegistry,
-    build_default_loop,
     create_provider,
 )
 from vela.core.contracts import ModelResponse, ToolCall, Usage

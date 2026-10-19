@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -100,7 +99,7 @@ async def part_two_isolation() -> None:
         loop.submit("user:alice", "alice speaks first"),
         loop.submit("user:bob", "bob speaks second"),
     )
-    for key, result in zip(("alice", "bob"), results):
+    for key, result in zip(("alice", "bob"), results, strict=True):
         store = SessionStore("./.demo/sessions")
         session = store.load(f"user:{key}")
         first = session.messages[0]["content"]

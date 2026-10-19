@@ -22,7 +22,7 @@ So this module does three things rather than just stamping markers:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 #: Relative prices against a normal input token, from Anthropic's published
@@ -34,7 +34,10 @@ PRICE_CACHE_WRITE_1H = 2.0
 PRICE_CACHE_READ = 0.1
 
 
-class CacheTTL(str, Enum):
+class CacheTTL(str, Enum):  # noqa: UP042
+    # Subclassing str keeps the value directly JSON-serialisable and comparable
+    # to a plain string, which the cache_control payload requires. StrEnum would
+    # be tidier but needs 3.11+, and the values must survive json.dumps either way.
     FIVE_MINUTES = "5m"
     ONE_HOUR = "1h"
 

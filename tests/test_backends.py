@@ -18,7 +18,7 @@ from vela import AgentLoop, SessionStore, ToolRegistry
 from vela.core.contracts import ModelResponse, ToolCall, Usage
 from vela.core.runner import AgentRunner, RunSpec, StopReason
 from vela.providers.anthropic import AnthropicProvider
-from vela.providers.base import GenerationConfig, Provider, ToolSpec
+from vela.providers.base import GenerationConfig, Provider
 from vela.providers.factory import (
     REGISTRY,
     UnknownProviderError,

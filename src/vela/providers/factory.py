@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vela.core.contracts import ModelResponse
 from vela.providers.base import GenerationConfig, Provider
 from vela.providers.caching import CachePolicy
 

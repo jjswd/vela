@@ -11,7 +11,6 @@ import json
 import httpx
 import pytest
 
-from vela.core.contracts import ModelResponse, Usage
 from vela.providers.anthropic import AnthropicProvider
 from vela.providers.anthropic_cache import (
     CACHE_CONTROL_EPHEMERAL,
@@ -24,8 +23,6 @@ from vela.providers.anthropic_cache import (
 from vela.providers.base import GenerationConfig, ToolSpec
 from vela.providers.caching import (
     PRICE_CACHE_READ,
-    PRICE_CACHE_WRITE_5MIN,
-    PRICE_CACHE_WRITE_1H,
     CachePolicy,
     CacheStats,
     CacheTTL,
@@ -199,7 +196,7 @@ def test_history_marker_preserves_message_order() -> None:
     messages = [message("user", f"m{i}") for i in range(6)]
     marked = mark_history(messages, turns_from_end=2)
     assert [m["role"] for m in marked] == [m["role"] for m in messages]
-    for original, result in zip(messages, marked):
+    for original, result in zip(messages, marked, strict=True):
         text = original["content"]
         if isinstance(result["content"], list):
             assert result["content"][0]["text"] == text

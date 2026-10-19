@@ -28,16 +28,15 @@ import httpx
 
 from vela.core.contracts import ModelResponse, ToolCall, Usage
 from vela.providers.anthropic_cache import apply_cache_markers
-from vela.providers.caching import CachePolicy, CacheStats
 from vela.providers.base import (
     GenerationConfig,
     Provider,
-    StreamEmitter,
     ToolSpec,
     classify_error,
     parse_tool_call_arguments,
     sanitize_messages,
 )
+from vela.providers.caching import CachePolicy, CacheStats
 
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 API_VERSION = "2023-06-01"

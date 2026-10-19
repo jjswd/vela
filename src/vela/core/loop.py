@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -95,10 +96,10 @@ class SessionStore:
         return self.root / f"{safe or 'default'}.json"
 
     def _quarantine(self, path: Path) -> None:
-        try:
+        # Best effort: if the rename fails there is still a usable session, just
+        # without the damaged file preserved for inspection.
+        with suppress(OSError):
             path.replace(path.with_suffix(".corrupt"))
-        except OSError:  # pragma: no cover - best effort
-            pass
 
 
 class AgentLoop:
@@ -183,10 +184,10 @@ class AgentLoop:
         for task in self._workers.values():
             task.cancel()
         for task in self._workers.values():
-            try:
+            # Shutdown is best effort: a worker that was already failing must
+            # not prevent the remaining ones from stopping.
+            with suppress(asyncio.CancelledError, Exception):
                 await task
-            except (asyncio.CancelledError, Exception):  # noqa: B014
-                pass
         self._workers.clear()
         self._queues.clear()
         await self._provider.aclose()

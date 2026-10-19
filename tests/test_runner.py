@@ -9,18 +9,14 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from vela.core.contracts import ModelResponse, ToolCall, Usage
 from vela.core.runner import (
-    MAX_EMPTY_RETRIES,
-    MAX_LENGTH_RECOVERIES,
     AgentRunner,
     RunSpec,
     StopReason,
     StreamingEmitter,
 )
-from vela.providers.base import GenerationConfig, Provider, ToolSpec
+from vela.providers.base import GenerationConfig, Provider
 from vela.tools.base import Tool
 from vela.tools.registry import ToolRegistry
 

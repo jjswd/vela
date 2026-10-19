@@ -9,11 +9,9 @@ know which backend is in use.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
-from vela.core.contracts import ModelResponse, ToolCall, Usage
+from vela.core.contracts import Usage
 from vela.providers.anthropic import (
     AnthropicProvider,
     parse_anthropic_response,
