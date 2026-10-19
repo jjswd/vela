@@ -1,6 +1,15 @@
 # Vela
 
+[![CI](https://github.com/YOUR_USERNAME/vela/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/vela/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+[![Tests](https://img.shields.io/badge/tests-179%20passing-brightgreen)](./tests)
+[![Code size](https://img.shields.io/badge/source-3.6k%20lines-lightgrey)](./src)
+
 一个小型 Agent 运行时：**编排、执行、能力三层分离**，并对不可信的模型输出提供有界恢复路径。
+
+写给需要自己搭 Agent 运行时的开发者：把「协议适配」「异常兜底」「上下文压缩」
+「成本控制」这四件容易做错的事，做成可复用、可验证、边界清晰的组件。
 
 > **一分钟验证**
 >
