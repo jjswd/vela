@@ -16,7 +16,7 @@
 > ```bash
 > pip install -e ".[dev]"
 > python examples/verify.py     # 46 项检查，无需 API key
-> pytest -q                     # 179 个测试
+> pytest -q                     # 217 个测试
 > ```
 >
 > `verify.py` 逐项跑通工具循环、三类恢复路径、增量流式、跨协议转换、会话隔离、
@@ -49,7 +49,7 @@ python examples/demo.py
 export VELA_BACKEND=deepseek DEEPSEEK_API_KEY=sk-... VELA_MODEL=deepseek-chat
 
 python examples/verify.py   # 46 checks, no API key needed
-pytest -q                     # 179 passed
+pytest -q                     # 217 passed
 ```
 
 最小用法：
@@ -154,6 +154,50 @@ print(loop.provider.cache_stats.summary())
 
 `CacheStats` 记录真实的命中与写入并算出相对成本，`cost_ratio > 1.0`
 就说明写入溢价尚未回本——策略是否有效用事实检验，而不是相信配置。
+
+## HTTP 服务
+
+```bash
+export VELA_API_KEY=sk-ant-...
+vela serve --backend anthropic --model claude-sonnet-4-5 --port 8080
+```
+
+接口兼容 OpenAI，因此现有 SDK、评测框架与前端可零改动接入：
+
+```bash
+curl localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"vela","messages":[{"role":"user","content":"你好"}]}'
+
+curl localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"写首诗"}],"stream":true}'   # SSE
+
+curl localhost:8080/health      # 存活与在途请求数
+curl localhost:8080/metrics     # Prometheus 格式
+```
+
+用标准库而非 Web 框架实现：三个端点而已，框架带来的概念比省下的多，
+而整个项目最在意的就是「小到能读完」。
+
+## 可观测性
+
+```python
+from vela import Instrumentor, Tracer
+
+metrics = Instrumentor()
+loop = build_default_loop(..., instrumentor=metrics, trace=True)
+result = await loop.run("s", "hi")
+print(loop.last_trace.to_text())      # 一次调用的 span 树
+```
+
+`/metrics` 暴露的指标里，最该盯的不是请求数，而是**恢复路径的触发次数**
+（`recovery_truncation_total`、`recovery_budget_exhausted_total` 等）。
+这套运行时的设计目标就是「模型不配合也能把请求做完」，因此一串悄悄恢复的
+请求在日志里完全看不出来——没有计数器就等于没有信号。
+
+同样的理由：指标按 label 值有上限，超出后归入 `other`。一个高基数的
+session 标签不该把其他指标一起拖垮。
 
 ## 多后端
 
@@ -263,8 +307,13 @@ src/vela/
     ├── registry.py      注册表 + 并发分发 + 名称纠错
     └── builtin.py       内置工具
 
-tests/                   179 个测试
-examples/demo.py端到端演示，无需 API key
+├── observability.py     指标 + span 追踪（零依赖，Prometheus 格式输出）
+├── server.py            HTTP 服务（标准库实现，OpenAI 兼容接口）
+└── cli.py               vela serve / chat / verify / providers
+
+tests/                   217 个测试
+examples/verify.py       46 项离线检查，无需 API key
+examples/demo.py         端到端演示，含脚本化后端
 ```
 
 ### 测试分布
@@ -311,7 +360,8 @@ tests/test_providers_tools.py   解析、错误分类、schema（29）
 
 ## 已知边界
 
-- 单进程内存态，会话落盘为 JSON；未做跨进程锁
+- 单进程；会话文件有进程内锁，跨进程仍需外部文件锁
+- HTTP 服务为标准库实现，未做连接数限制与背压
 - 压缩阈值为字符/token 估算，未接精确 tokenizer
 - OpenAI 兼容后端的缓存由服务端自动管理，未做请求路由优化
 - 缓存断点为静态规划，未实现基于实际命中率的动态调整

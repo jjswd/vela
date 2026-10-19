@@ -8,19 +8,21 @@ Numbers below are measured from this codebase, not estimated.
 > A small agent runtime in Python that separates orchestration from model
 > execution, absorbs two LLM wire protocols behind one provider contract, and
 > treats model output as untrusted input — every recovery path is bounded.
+> Exposed as a library, an OpenAI-compatible HTTP service, and a CLI.
 
 ## Scale to quote accurately
 
 | Metric | Value |
 | --- | --- |
-| Source | 3,573 lines across 16 modules |
-| Tests | 179 across 8 files (2,890 lines) |
+| Source | ~4,800 lines across 20 modules |
+| Tests | 217 across 10 files (~3,650 lines) |
 | Offline checks | 46, no API key required |
 | Providers | 2 protocols, 6 registered backends |
+| Interfaces | Python API, OpenAI-compatible HTTP, CLI |
 | Python | 3.11 – 3.13 (CI matrix) |
 
-Quote these exactly: 3,573 lines of source, 2,890 of tests, 179 test cases, 46
-offline checks. If asked about the recovery paths, there are eight and each has an
+Quote these exactly: about 4,800 lines of source, 217 test cases, 46 offline checks,
+2 wire protocols behind one provider contract. If asked about the recovery paths, there are eight and each has an
 explicit bound.
 
 ## Questions to expect, with the shape of a good answer
@@ -133,6 +135,33 @@ would each have made the savings look better than the invoice: excluding cached
 writes from the baseline, and subtracting cache hits from the uncached input
 count when the backend already reports them separately.
 
+### How do you know the system is healthy in production?
+
+`/metrics` exposes counters and latency distributions in Prometheus format. The
+ones that matter are not request counts but the recovery counters —
+`recovery_truncation_total`, `recovery_budget_exhausted_total`,
+`model_errors_total`. This runtime is designed to finish a turn even when the
+model misbehaves, so a run of quietly recovered turns is invisible in logs; a
+metric that only fires on the happy path is worse than none because it reports
+healthy while the model is degrading.
+
+Label values are capped and collapse into `other`, per metric and label name, so
+a high-cardinality series cannot starve the rest.
+
+### What did you find when you added an HTTP server?
+
+A concurrency defect that only appears once two requests share a session.
+`os.replace` raises on Windows when the destination file is open elsewhere — I
+measured 4 failures out of 20 concurrent replaces — so the write-then-rename
+that makes sessions crash-safe also makes them collide under concurrency.
+
+Three things were wrong and each needed fixing separately: the temporary
+filename was shared between writers, the lock was per store instance while the
+server builds a new store per request, and load-run-save was not atomic so two
+callers could each load the same transcript and have the second save discard
+the first turn. The fix is a process-wide lock per session directory plus a
+per-session async lock around the whole cycle.
+
 ### What would you do differently?
 
 - Replace the character-per-token estimate used for compaction thresholds with
@@ -151,12 +180,14 @@ count when the backend already reports them separately.
 
 Saying these before being asked reads as judgement rather than defensiveness.
 
-- No scheduler, no worker pool, no rate limiting across sessions.
-- Sessions are JSON files; no cross-process safety.
+- No scheduler, no worker pool, no rate limiting. The HTTP server has no
+  connection cap or backpressure.
+- Sessions are JSON files guarded by an in-process lock; two processes sharing
+  a workspace still need an external file lock.
 - Only two wire protocols.
-- No retry policy on the HTTP layer beyond transient errors at the runner.
-- Compaction summarisation uses the same model call, which is a cost line item
-  that is easy to overlook.
+- Compaction summarisation costs a model call, which is easy to overlook when
+  reading the config.
+- The cache breakpoints are static rather than adapted from observed hits.
 
 ## What to show, in order
 

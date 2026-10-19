@@ -14,6 +14,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
+import time
+import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -22,6 +25,7 @@ from typing import Any
 
 from vela.core.contracts import Usage
 from vela.core.runner import AgentRunner, RunResult, RunSpec, StreamEmitter
+from vela.observability import Instrumentor, Tracer
 from vela.providers.base import Provider
 from vela.tools.registry import ToolRegistry, load_builtin_tools
 
@@ -48,17 +52,46 @@ class Session:
         return int(total / CHARS_PER_TOKEN)
 
 
+#: One lock per session directory, shared across every store instance in the
+#: process. Keying per instance would not help: the HTTP server builds a new
+#: store per request, so two concurrent requests would take different locks and
+#: still collide on the same file. os.replace raises on Windows when the
+#: destination is open elsewhere -- measured at 4 of 20 concurrent replaces --
+#: so this is a correctness guard, not a nicety.
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
 class SessionStore:
-    """Persists sessions as one JSON file per key."""
+    """Persists sessions as one JSON file per key.
+
+    Reads and writes for one directory are serialised. A crash mid-write must
+    not leave an unparseable file, so the write goes to a temporary path and is
+    renamed into place; the lock is what keeps concurrent writers from tripping
+    over each other during that rename.
+    """
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        resolved = str(self.root.resolve())
+        with _PATH_LOCKS_GUARD:
+            self._lock = _PATH_LOCKS.setdefault(resolved, threading.RLock())
+
+    def _lock_for(self, key: str) -> threading.RLock:
+        # Signature kept for call sites that pass a key; the lock covers the
+        # whole directory, which is stricter and still allows different
+        # directories to proceed in parallel.
+        return self._lock
 
     def load(self, key: str) -> Session:
         path = self._path(key)
-        if not path.exists():
-            return Session(key=key)
+        with self._lock_for(key):
+            if not path.exists():
+                return Session(key=key)
+            return self._read_locked(path, key)
+
+    def _read_locked(self, path: Path, key: str) -> Session:
         try:
             payload = json.loads(path.read_text("utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
@@ -83,10 +116,24 @@ class SessionStore:
             "messages": session.messages,
         }
         # Write-then-rename: a crash mid-write must not leave a half-written
-        # session that fails to parse on the next load.
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
-        temporary.replace(path)
+        # session that fails to parse on the next load. The temporary name is
+        # unique per write so two concurrent writers cannot target one file --
+        # a shared ".tmp" makes the loser's rename fail with a permission error
+        # on Windows and silently discard data elsewhere.
+        unique = f".{uuid.uuid4().hex[:12]}.tmp"
+        temporary = path.with_name(path.name + unique)
+        # os.replace fails on Windows when the destination is open elsewhere, so
+        # writers for one session must not overlap. Verified necessary: 4 of 20
+        # unsynchronised replaces raised PermissionError.
+        with self._lock_for(session.key):
+            try:
+                temporary.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), "utf-8"
+                )
+                temporary.replace(path)
+            except OSError:
+                temporary.unlink(missing_ok=True)
+                raise
 
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
@@ -116,20 +163,35 @@ class AgentLoop:
         max_iterations: int = 12,
         compact_at_tokens: int = 60_000,
         summarize: Callable[[list[dict[str, Any]]], Awaitable[str]] | None = None,
+        instrumentor: Instrumentor | None = None,
+        trace: bool = False,
     ) -> None:
         self._provider = provider
         self._tools = tools
         self._store = store
-        self._runner = AgentRunner(provider, tools)
+        #: Optional. Without it the runtime emits nothing, which keeps the core
+        #: independent of any observability stack.
+        self.instrumentor = instrumentor
+        self._trace = trace
+        self._runner = AgentRunner(provider, tools, instrumentor=instrumentor)
         self.workspace = Path(workspace)
         self.system = system
         self.max_iterations = max_iterations
         self.compact_at_tokens = compact_at_tokens
         self._summarize = summarize
         self._queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        # Per-session lock around load -> run -> save. Without it, two
+        # concurrent callers for one session both load the same transcript and
+        # the second save discards the first turn's work. Per-session rather than
+        # global so unrelated sessions stay parallel.
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._session_locks_guard = threading.Lock()
         self._workers: dict[str, asyncio.Task[None]] = {}
         self._pending: dict[str, list[dict[str, Any]]] = {}
         self._closed = False
+        #: Spans from the most recent turn, for callers that want to inspect a
+        #: turn without attaching a tracing backend.
+        self.last_trace = Tracer(enabled=False)
 
     # ------------------------------------------------------------------
     # Public API
@@ -166,9 +228,29 @@ class AgentLoop:
         emitter: StreamEmitter | None = None,
         ephemeral: bool = False,
     ) -> RunResult:
-        """Process one message directly, bypassing the per-session queue."""
-        session = self._store.load(session_key)
-        return await self._execute(session, text, emitter=emitter, ephemeral=ephemeral)
+        """Process one message directly, bypassing the per-session queue.
+
+        Serialised per session so concurrent callers cannot interleave a
+        load-modify-save cycle on the same transcript.
+        """
+        async with self._session_lock(session_key):
+            session = self._store.load(session_key)
+            return await self._execute(
+                session, text, emitter=emitter, ephemeral=ephemeral
+            )
+
+    def _session_lock(self, key: str) -> asyncio.Lock:
+        """Lock for one session's load-run-save cycle.
+
+        Lazily created under a guard because several threads may reach a fresh
+        loop at once: each request in the HTTP server runs on its own thread.
+        """
+        with self._session_locks_guard:
+            lock = self._session_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._session_locks[key] = lock
+            return lock
 
     def queue_message(self, session_key: str, text: str) -> None:
         """Enqueue input for injection into an in-flight turn.
@@ -229,13 +311,19 @@ class AgentLoop:
         await self._compact_if_needed(session)
 
         drain = lambda: self._collect_pending(session.key)  # noqa: E731
+        tracer = Tracer(enabled=self._trace)
         spec = RunSpec(
             system=self._build_system(session),
             messages=list(session.messages),
             max_iterations=self.max_iterations,
             session_id=session.key,
+            tracer=tracer,
         )
-        result = await self._runner.run(spec, emitter=emitter, drain_injections=drain)
+        started = time.perf_counter()
+        try:
+            result = await self._runner.run(spec, emitter=emitter, drain_injections=drain)
+        finally:
+            self.last_trace = tracer
 
         session.messages = result.messages
         if not ephemeral:
@@ -247,6 +335,13 @@ class AgentLoop:
             len(result.tools_used),
             result.usage.total_tokens,
         )
+        if self.instrumentor is not None:
+            self.instrumentor.record_turn(
+                session=session.key,
+                result=result,
+                duration_s=time.perf_counter() - started,
+                tracer=tracer,
+            )
         return result
 
     async def _collect_pending(self, session_key: str) -> list[dict[str, Any]]:

@@ -16,6 +16,7 @@ from __future__ import annotations
 from vela.core.contracts import ModelResponse, ToolCall, ToolResult, Usage
 from vela.core.loop import AgentLoop, Session, SessionStore, build_default_loop
 from vela.core.runner import AgentRunner, RunResult, RunSpec, StreamingEmitter
+from vela.observability import Instrumentor, Metrics, Span, Tracer
 from vela.providers.anthropic import AnthropicProvider
 from vela.providers.base import (
     AuthError,
@@ -40,13 +41,18 @@ from vela.providers.factory import (
     create_provider,
 )
 from vela.providers.openai_compat import OpenAICompatProvider
+from vela.server import ServerConfig, VelaServer
 from vela.tools.base import FunctionTool, Tool, tool
 from vela.tools.registry import ToolRegistry
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "AgentLoop",
+    "Instrumentor",
+    "Metrics",
+    "Span",
+    "Tracer",
     "CachePolicy",
     "CacheStats",
     "CacheTTL",
@@ -64,6 +70,7 @@ __all__ = [
     "RateLimitError",
     "RunResult",
     "RunSpec",
+    "ServerConfig",
     "Session",
     "SessionStore",
     "StreamingEmitter",
@@ -73,6 +80,7 @@ __all__ = [
     "ToolRegistry",
     "ToolResult",
     "TransientError",
+    "VelaServer",
     "UnknownProviderError",
     "available_providers",
     "create_provider",

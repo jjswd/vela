@@ -11,6 +11,7 @@ recovery against untrusted input is just a way to burn tokens.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,6 +22,7 @@ from vela.core.contracts import (
     ToolResult,
     Usage,
 )
+from vela.observability import Instrumentor, Tracer
 from vela.providers.base import Provider, ProviderError, StreamEmitter
 from vela.tools.registry import ToolRegistry
 
@@ -63,6 +65,9 @@ class RunSpec:
     tool_timeout: float | None = 60.0
     finalize_on_limit: bool = True
     session_id: str = "default"
+    #: Optional collector for this turn. Passed through rather than constructed
+    #: here so the caller decides what to do with the result.
+    tracer: Tracer | None = None
 
 
 @dataclass
@@ -82,9 +87,18 @@ class RunResult:
 class AgentRunner:
     """Owns the model-facing loop. Knows nothing about channels or transports."""
 
-    def __init__(self, provider: Provider, tools: ToolRegistry) -> None:
+    def __init__(
+        self,
+        provider: Provider,
+        tools: ToolRegistry,
+        *,
+        instrumentor: Instrumentor | None = None,
+    ) -> None:
         self._provider = provider
         self._tools = tools
+        #: Optional. Absent means no instrumentation and no behaviour change,
+        #: which keeps the runtime usable without an observability stack.
+        self.instrumentor = instrumentor
 
     async def run(
         self,
@@ -125,7 +139,22 @@ class AgentRunner:
 
     async def _step(self, state: _RunState) -> bool:
         """Run one model call. Returns ``True`` when the turn is finished."""
-        response = await self._request(state)
+        tracer = state.spec.tracer
+        started = time.perf_counter()
+        # The span wraps the request so its duration is attributed correctly and
+        # an exception is recorded on it rather than lost.
+        context = tracer.span("model_request", iteration=state.iteration) if tracer else _NULL_SPAN
+        with context as span:
+            response = await self._request(state)
+            if span is not None:
+                span.attributes["tool_calls"] = len(response.tool_calls)
+                span.attributes["finish_reason"] = response.finish_reason
+        if self.instrumentor is not None:
+            self.instrumentor.metrics.observe(
+                "model_request_seconds", time.perf_counter() - started
+            )
+        if tracer is not None:
+            tracer.event("model_responded", f"tool_calls={len(response.tool_calls)}")
 
         if response.wants_tools:
             return await self._handle_tools(state, response)
@@ -189,11 +218,35 @@ class AgentRunner:
             }
         )
 
-        records = await self._tools.dispatch(
-            response.tool_calls,
-            concurrent=state.spec.concurrent_tools,
-            timeout=state.spec.tool_timeout,
+        tracer = state.spec.tracer
+        tool_started = time.perf_counter()
+        tool_context = (
+            tracer.span("tool_batch", count=len(response.tool_calls)) if tracer else _NULL_SPAN
         )
+        with tool_context:
+            records = await self._tools.dispatch(
+                response.tool_calls,
+                concurrent=state.spec.concurrent_tools,
+                timeout=state.spec.tool_timeout,
+            )
+        if self.instrumentor is not None:
+            self.instrumentor.metrics.increment("tool_batches_total")
+            self.instrumentor.metrics.observe(
+                "tool_batch_seconds", time.perf_counter() - tool_started
+            )
+        if self.instrumentor is not None:
+            for record in records:
+                status = "ok" if not record.result.is_error else "error"
+                self.instrumentor.metrics.increment(
+                    "tool_results_total", tool=record.call.name, status=status
+                )
+                if record.result.is_error:
+                    # Error messages are model-facing, so the count matters more
+                    # than the content: a tool failing repeatedly means the
+                    # capability is broken, not that the model is unlucky.
+                    self.instrumentor.metrics.increment(
+                        "tool_errors_total", tool=record.call.name
+                    )
 
         for record in records:
             state.tools_used.append(record.call.name)
@@ -219,6 +272,8 @@ class AgentRunner:
             state.append_assistant(state.final_content)
             return not await state.drain()
 
+        if self.instrumentor is not None:
+            self.instrumentor.metrics.increment("recovery_empty_response_total")
         state.empty_retries += 1
         if state.empty_retries < MAX_EMPTY_RETRIES:
             logger.warning(
@@ -257,6 +312,8 @@ class AgentRunner:
         at the end. Emitting partial text on every retry produces duplicated or
         visibly stuttering output.
         """
+        if self.instrumentor is not None:
+            self.instrumentor.metrics.increment("recovery_truncation_total")
         if len(state.length_segments) < MAX_LENGTH_RECOVERIES:
             state.length_segments.append(content)
             logger.info(
@@ -279,6 +336,8 @@ class AgentRunner:
 
     async def _handle_error(self, state: _RunState, response: ModelResponse) -> bool:
         """Record a model error, then honour any queued input before exiting."""
+        if self.instrumentor is not None:
+            self.instrumentor.metrics.increment("model_errors_total")
         message = response.error_message(DEFAULT_ERROR_MESSAGE)
         state.final_content = message
         state.stop_reason = StopReason.ERROR
@@ -297,6 +356,8 @@ class AgentRunner:
         summary, and removing the tool definitions makes it structurally
         impossible for the model to start new work it cannot finish.
         """
+        if self.instrumentor is not None:
+            self.instrumentor.metrics.increment("recovery_budget_exhausted_total")
         await state.drain()
 
         terminal = ""
@@ -397,6 +458,23 @@ class AgentRunner:
             content=f"{result.content[:limit]}\n\n[truncated {dropped} characters]",
             status=result.status,
         )
+
+
+class _NullSpan:
+    """No-op stand-in used when tracing is off.
+
+    Lets instrumentation read as ordinary ``with`` usage instead of branching on
+    whether tracing happens to be enabled.
+    """
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+_NULL_SPAN = _NullSpan()
 
 
 class _Cancelled(Exception):
