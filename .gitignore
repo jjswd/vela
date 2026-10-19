@@ -1,6 +1,15 @@
 __pycache__/
 *.pyc
+*.egg-info/
+.venv/
+venv/
 .demo/
 .demo-workspace/
-.venv/
-*.egg-info/
+.idea/
+.vscode/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.env
