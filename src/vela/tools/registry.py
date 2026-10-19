@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from vela.core.contracts import ToolCall, ToolResult
@@ -25,11 +26,23 @@ class DispatchRecord:
 
 
 class ToolRegistry:
-    """Holds tools and runs them, optionally in parallel."""
+    """Holds tools and runs them, optionally in parallel.
+
+    A tool may declare itself blocking, meaning its ``run`` performs synchronous
+    IO such as walking a directory tree. Those are executed on a worker thread so
+    a slow tool cannot stall the event loop and every other in-flight request
+    with it. A tool that blocks without declaring it would be a latent outage,
+    which is why the flag exists rather than dispatching everything off-thread.
+    """
 
     def __init__(self, tools: Sequence[Tool] | None = None) -> None:
         self._tools: dict[str, Tool] = {}
         self._cache: list[ToolSpec] | None = None
+        # Shared across instances is fine: the work is IO-bound, so the pool
+        # scales on waiting rather than on CPU.
+        self._executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="vela-tool"
+        )
         for tool in tools or ():
             self.register(tool)
 
@@ -110,6 +123,9 @@ class ToolRegistry:
             )
 
         tool = self._tools.get(call.name)
+        if tool is not None and getattr(tool, "blocking", False):
+            return await self._run_blocking(tool, call, timeout)
+
         if tool is None:
             suggestion = self._suggest(call.name)
             hint = f" Did you mean '{suggestion}'?" if suggestion else ""
@@ -143,6 +159,84 @@ class ToolRegistry:
                 content=f"{type(exc).__name__}: {exc}",
                 status="error",
             )
+
+    async def _run_blocking(self, tool: Tool, call: ToolCall, timeout: float | None) -> ToolResult:
+        """Execute a synchronous tool on a worker thread.
+
+        The validation-and-run sequence that :meth:`Tool.execute` performs is
+        reproduced here rather than awaited inside the thread: ``execute`` is a
+        coroutine, and awaiting one from a worker thread yields a coroutine that
+        never runs. Tool ``run`` implementations are synchronous by contract for
+        exactly this reason.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            future = loop.run_in_executor(self._executor, self._execute_blocking_sync, tool, call)
+            if timeout is not None:
+                return await asyncio.wait_for(future, timeout=timeout)
+            return await future
+        except TimeoutError:
+            return ToolResult(
+                call_id=call.id,
+                name=call.name,
+                content=f"Tool '{call.name}' exceeded {timeout:.0f}s and was cancelled.",
+                status="error",
+            )
+        except Exception as exc:  # noqa: BLE001 - boundary
+            return ToolResult(
+                call_id=call.id,
+                name=call.name,
+                content=f"{type(exc).__name__}: {exc}",
+                status="error",
+            )
+
+    @staticmethod
+    def _execute_blocking_sync(tool: Tool, call: ToolCall) -> ToolResult:
+        """Execute a blocking tool to completion, from a worker thread.
+
+        Tools are coroutines by contract, but a blocking one cannot be awaited
+        on the shared loop without stalling it. So the coroutine runs on a
+        private loop owned by the worker thread. Awaiting it directly from the
+        thread would yield a coroutine that never executes, and calling the
+        underlying ``run`` would bypass validation and error wrapping.
+        """
+        import asyncio as _asyncio
+
+        from vela.tools.base import validate_arguments
+
+        errors = validate_arguments(tool.parameters, call.arguments)
+        if errors:
+            return ToolResult(
+                call_id=call.id,
+                name=tool.name,
+                content=f"Invalid parameters for '{tool.name}': {'; '.join(errors)}",
+                status="error",
+            )
+
+        private_loop = _asyncio.new_event_loop()
+        try:
+            content = private_loop.run_until_complete(tool.run(call.arguments))
+        except Exception as exc:  # noqa: BLE001 - boundary
+            return ToolResult(
+                call_id=call.id,
+                name=tool.name,
+                content=f"{type(exc).__name__}: {exc}",
+                status="error",
+            )
+        finally:
+            private_loop.close()
+
+        # ``run`` yields the model-facing text; the envelope is added here so a
+        # blocking tool's result is shaped exactly like every other tool's.
+        return ToolResult(
+            call_id=call.id,
+            name=tool.name,
+            content=content if isinstance(content, str) else str(content),
+        )
+
+    def shutdown(self) -> None:
+        """Release the worker threads. Call when the registry is discarded."""
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _suggest(self, name: str) -> str | None:
         """Offer a correction when a tool name looks like a typo.

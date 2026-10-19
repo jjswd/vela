@@ -51,7 +51,7 @@ python examples/demo.py
 export VELA_BACKEND=deepseek DEEPSEEK_API_KEY=sk-... VELA_MODEL=deepseek-chat
 
 python examples/verify.py   # 46 checks, no API key needed
-pytest -q                     # 217 passed
+pytest -q                     # 239 passed
 ```
 
 最小用法：
@@ -104,6 +104,51 @@ class WeatherTool(Tool):
         return f"{arguments['city']}: 22°C 晴"
 
 loop = build_default_loop(..., extra_tools=[WeatherTool()])
+```
+
+## 场景：仓库文档腐化巡检
+
+```bash
+python examples/audit.py                 # 确定性模式，无需 API key
+python examples/audit.py /path/to/repo   # 扫任意仓库
+VELA_API_KEY=sk-... python examples/audit.py   # 走 agent 编排
+```
+
+回答每个仓库主都会遇到的问题：**文档还成立吗？** 检查失效的相对链接、
+代码块里已不存在的文件路径、源码里的凭证、无测试覆盖的模块、循环依赖。
+
+```
+repository audit -- vela
+============================================================
+scanned 44 files  |  critical: 0  high: 3  medium: 31  low: 23
+
+HIGH (3)
+  ! src/vela/tools/builtin.py:62
+     dangerous-eval: Dynamic execution turns any untrusted string into code.
+     | value = eval(expression, {"__builtins__": {}}, {})  # noqa: S307 - sanitized
+```
+
+### 扫描交给工具，判断留给模型
+
+这个分工是场景的核心。模型擅长跨仓库决定「该查什么」以及「怎么解释发现的问题」，
+但让它在几十个文件里可靠地做正则匹配是浪费且不稳。所以 `vela.tools.audit`
+里的扫描是确定性的，agent 只负责编排与表达。
+
+好处是：**同样的工具，两种模式产出的发现完全一致**，模型只改变呈现方式，
+不改变事实。这一点比"更聪明的扫描器"更重要——审计工具的价值在于可信。
+
+### 每条发现都可验证
+
+所有发现都带文件与行号引用，没有引用的断言就是猜测，而猜测出现在审计报告里
+比没有报告更糟。扫描达到文件上限时会显式报告 `truncated`，而不是假装扫全了。
+
+### 阻塞工具不会拖垮服务
+
+全仓库扫描实测 41 秒（16k 文件的仓库），在事件循环里同步做会卡住整个服务。
+工具通过 `blocking = True` 声明自己要做同步 IO，注册表把它卸载到工作线程：
+
+```
+扫描 41.4s 期间，并发协程心跳 200 次全部按时执行，最大间隔 138ms
 ```
 
 ## Prompt caching
@@ -313,8 +358,9 @@ src/vela/
 ├── server.py            HTTP 服务（标准库实现，OpenAI 兼容接口）
 └── cli.py               vela serve / chat / verify / providers
 
-tests/                   217 个测试
+tests/                   239 个测试
 examples/verify.py       46 项离线检查，无需 API key
+examples/audit.py        仓库巡检场景
 examples/demo.py         端到端演示，含脚本化后端
 ```
 
