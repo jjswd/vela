@@ -7,7 +7,7 @@
 > ```bash
 > pip install -e ".[dev]"
 > python examples/verify.py     # 46 项检查，无需 API key
-> pytest -q                     # 177 个测试
+> pytest -q                     # 179 个测试
 > ```
 >
 > `verify.py` 逐项跑通工具循环、三类恢复路径、增量流式、跨协议转换、会话隔离、
@@ -40,7 +40,7 @@ python examples/demo.py
 export VELA_BACKEND=deepseek DEEPSEEK_API_KEY=sk-... VELA_MODEL=deepseek-chat
 
 python examples/verify.py   # 46 checks, no API key needed
-pytest -q                     # 177 passed
+pytest -q                     # 179 passed
 ```
 
 最小用法：
@@ -254,7 +254,7 @@ src/vela/
     ├── registry.py      注册表 + 并发分发 + 名称纠错
     └── builtin.py       内置工具
 
-tests/                   177 个测试
+tests/                   179 个测试
 examples/demo.py端到端演示，无需 API key
 ```
 
@@ -294,6 +294,11 @@ tests/test_providers_tools.py   解析、错误分类、schema（29）
 ```
 
 测试重点是**恢复路径的契约**：为什么每个上限存在、被删除时会发生什么。这比测试正常流程更能防止回归。
+
+## 文档
+
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — 分层、数据流、每条恢复路径的推理
+- [`INTERVIEW.md`](./INTERVIEW.md) — 面试问答准备与可复述的数字
 
 ## 已知边界
 
