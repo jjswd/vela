@@ -31,7 +31,8 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          # The server extra is included so the HTTP surface is tested too.
+          pip install -e ".[dev,server]"
 
       - name: Run tests
         run: pytest -q
@@ -44,6 +45,27 @@ jobs:
         # Proves the documented behaviour still holds, and that the package
         # works from a clean checkout without any credentials.
         run: python examples/verify.py
+
+      - name: Check the core without the web stack
+        # FastAPI is optional, so the core must import even when the web
+        # packages are unavailable. Blocking the import in a subprocess tests
+        # the guarantee directly rather than inferring it from what happens to
+        # be installed.
+        run: |
+          python - <<'PY'
+          import sys
+
+          class Blocker:
+              def find_spec(self, name, path=None, target=None):
+                  if name.split('.')[0] in ('fastapi', 'pydantic', 'starlette'):
+                      raise ImportError('blocked')
+                  return None
+
+          sys.meta_path.insert(0, Blocker())
+          import vela
+          assert vela.available_providers()
+          print('core imports without the web stack')
+          PY
 
   lint:
     name: lint
@@ -64,7 +86,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]" mypy
+      - run: pip install -e ".[dev,server]" mypy
       - name: Run mypy
         # The provider/tool boundary is where types matter most, so start there
         # and report rather than fail the build while the codebase is typed out.
@@ -95,7 +117,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev,server]"
       - name: Run the quick-start demo
         # Proves the documented entry point works on a clean machine, with no
         # API key and no network access.

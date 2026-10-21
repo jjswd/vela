@@ -75,7 +75,18 @@ def _require_key(backend: str) -> str:
 
 
 def cmd_serve(args: list[str]) -> int:
-    from vela.server import ServerConfig, VelaServer
+    try:
+        from vela.server import ServerConfig, VelaServer
+    except ImportError:
+        # FastAPI is optional, so its absence is a normal configuration state
+        # rather than a crash.
+        print(
+            "error: the server needs FastAPI.\n"
+            "       install it with: pip install 'vela[server]'\n"
+            "       or: pip install fastapi 'uvicorn[standard]'",
+            file=sys.stderr,
+        )
+        return 1
 
     options = _parse_flags(args)
     backend = options.get("backend") or _env("VELA_BACKEND", "openai")
@@ -120,7 +131,8 @@ def cmd_serve(args: list[str]) -> int:
     print(f"  auth      {'bearer token required' if token else 'open (loopback only)'}")
     print("\n  POST /v1/chat/completions   OpenAI-compatible")
     print("  GET  /health                liveness")
-    print("  GET  /metrics               Prometheus exposition\n")
+    print("  GET  /metrics               Prometheus exposition")
+    print("  GET  /docs                  interactive API documentation\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -1,35 +1,45 @@
-"""HTTP server exposing the runtime, with no third-party dependency.
+"""HTTP server exposing the runtime.
 
-Two reasons it is built on the standard library rather than a framework. First,
-the runtime's value proposition is being small enough to read, and a web
-framework would be the heaviest dependency in it. Second, the surface here is
-three endpoints; a framework would add more concepts than it removes.
+Built on FastAPI, which is the framework a reviewer will expect to see in a
+Python service, and which removes three things this file used to do by hand:
+request validation, SSE framing, and running the agent on the event loop
+rather than on a private one.
 
-The API is OpenAI-compatible on purpose. Existing clients, SDKs, evaluation
-harnesses, and front ends then work against it unchanged, which is the
-difference between a demo and something a colleague can actually call.
+The API surface is OpenAI-compatible on purpose. Existing clients, SDKs,
+evaluation harnesses, and front ends then work against it unchanged, which is
+the difference between a demo and something a colleague can actually call.
+
+FastAPI is an optional dependency. The core runtime does not need it, so
+``pip install vela`` stays light and ``pip install vela[server]`` adds the web
+surface. Importing this module without FastAPI raises a clear error rather
+than an obscure one from deep inside the framework.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from vela.observability import Instrumentor
 
-logger = logging.getLogger(__name__)
+try:
+    from fastapi import FastAPI, Header, HTTPException, Request
+    from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+    from pydantic import BaseModel, Field, field_validator
+except ImportError as exc:  # pragma: no cover - exercised only without the extra
+    raise ImportError(
+        "vela.server needs FastAPI. Install it with: pip install 'vela[server]'"
+    ) from exc
 
-#: Refuse bodies larger than this. The model decides how much text arrives, so an
-#: unbounded body is an easy way to be handed an out-of-memory payload.
-MAX_BODY_BYTES = 4 * 1024 * 1024
+
+# --------------------------------------------------------------------------
+# Configuration
+# --------------------------------------------------------------------------
 
 
 @dataclass
@@ -41,6 +51,146 @@ class ServerConfig:
     #: Sent as a bearer token when set. Bound to loopback by default, so an
     #: empty token is only reachable from the machine itself.
     api_key: str = ""
+
+
+# --------------------------------------------------------------------------
+# Request and response models
+# --------------------------------------------------------------------------
+
+
+class ChatMessage(BaseModel):
+    """One message in the conversation.
+
+    ``content`` accepts a string or a list of blocks, because OpenAI permits
+    multimodal input and rejecting it would break existing clients for no
+    reason. Only the text parts are used.
+    """
+
+    role: str = Field(pattern="^(system|user|assistant)$")
+    content: str | list[dict[str, Any]]
+
+    @field_validator("content")
+    @classmethod
+    def _require_text(cls, value: str | list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+        if isinstance(value, str):
+            if not value.strip():
+                raise ValueError("message content must not be empty")
+            return value
+        if not value:
+            raise ValueError("message content blocks must not be empty")
+        return value
+
+    def text(self) -> str:
+        """The text this message contributes to the transcript."""
+        if isinstance(self.content, str):
+            return self.content
+        parts = [
+            block.get("text", "")
+            for block in self.content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        return "".join(parts)
+
+
+class ChatCompletionRequest(BaseModel):
+    """The request body, matching the OpenAI shape."""
+
+    model: str = "vela"
+    messages: list[ChatMessage] = Field(min_length=1)
+    stream: bool = False
+    #: Session key. OpenAI clients do not send this, but it is what makes the
+    #: server stateful across calls, so it is accepted under both names.
+    user: str | None = None
+    session: str | None = None
+
+    def session_key(self) -> str:
+        return self.user or self.session or "api:default"
+
+    def last_prompt(self) -> str:
+        return self.messages[-1].text()
+
+
+class ChatCompletionChoice(BaseModel):
+    index: int = 0
+    message: dict[str, Any]
+    finish_reason: str = "stop"
+
+
+class ChatCompletionUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class ChatCompletionResponse(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str = "vela"
+    choices: list[ChatCompletionChoice]
+    usage: ChatCompletionUsage
+
+
+class ModelCard(BaseModel):
+    id: str = "vela"
+    object: str = "model"
+
+
+class ModelList(BaseModel):
+    object: str = "list"
+    data: list[ModelCard]
+
+
+class HealthResponse(BaseModel):
+    status: str = "ok"
+    inflight: int = 0
+
+
+# --------------------------------------------------------------------------
+# Application
+# --------------------------------------------------------------------------
+
+
+def _finish_reason(stop_reason: str) -> str:
+    """Map the internal stop reason onto the OpenAI vocabulary."""
+    return {
+        "completed": "stop",
+        "max_iterations": "length",
+        "empty_final_response": "stop",
+        "error": "stop",
+        "cancelled": "stop",
+    }.get(stop_reason, "stop")
+
+
+def _sse_chunk(
+    completion_id: str,
+    model: str,
+    delta: str,
+    *,
+    finish_reason: str | None = None,
+    error: str = "",
+) -> str:
+    """Render one OpenAI-compatible streaming chunk.
+
+    Shaped like the non-streaming response so a client can accumulate deltas
+    without branching on which mode it asked for.
+    """
+    payload: dict[str, Any] = {
+        "id": f"chatcmpl-{completion_id}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"content": delta} if delta else {},
+                "finish_reason": finish_reason,
+            }
+        ],
+    }
+    if error:
+        payload["error"] = {"message": error, "type": "internal_error"}
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 class VelaServer:
@@ -64,358 +214,202 @@ class VelaServer:
         self.workspace = workspace
         self.system = system
         self.metrics = (instrumentor or Instrumentor()).metrics
-        self._httpd: ThreadingHTTPServer | None = None
-        #: Requests currently in flight, for graceful shutdown and for /metrics.
+        #: Requests currently in flight, reported by /health.
         self.inflight = 0
+        self.app = self._build_app()
 
     # ------------------------------------------------------------------
-    # Request handling
+    # Routes
     # ------------------------------------------------------------------
 
-    def handle_chat(self, body: dict[str, Any], stream: bool) -> dict[str, Any] | str:
-        """Run one chat completion.
+    def _build_app(self) -> FastAPI:
+        app = FastAPI(
+            title="Vela",
+            version="0.5.0",
+            description=(
+                "A small agent runtime. The chat endpoint is OpenAI-compatible, "
+                "so existing clients work against it unchanged."
+            ),
+        )
 
-        Returns either a response dict or, when streaming, an iterator of SSE
-        payload strings. Kept synchronous and called through ``run_coroutine``
-        so the async loop stays owned by the loop layer.
+        @app.middleware("http")
+        async def _count_inflight(request: Request, call_next):
+            # Counted so /health can report pressure, and so a hung request is
+            # visible from outside the process.
+            self.inflight += 1
+            try:
+                return await call_next(request)
+            finally:
+                self.inflight -= 1
+
+        @app.exception_handler(Exception)
+        async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": {
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "type": "internal_error",
+                    }
+                },
+            )
+
+        @app.get("/health", response_model=HealthResponse, tags=["ops"])
+        async def health() -> HealthResponse:
+            return HealthResponse(inflight=self.inflight)
+
+        @app.get("/metrics", tags=["ops"], response_class=PlainTextResponse)
+        async def metrics() -> str:
+            # Prometheus exposition format, so no client library is needed on
+            # the scraping side either.
+            return self.metrics.to_prometheus()
+
+        @app.get("/v1/models", response_model=ModelList, tags=["chat"])
+        async def models() -> ModelList:
+            return ModelList(data=[ModelCard()])
+
+        @app.post(
+            "/v1/chat/completions",
+            tags=["chat"],
+            summary="Chat completion",
+            response_model=None,
+        )
+        async def chat_completions(
+            request: ChatCompletionRequest,
+            authorization: str | None = Header(default=None),
+        ):
+            if not self._authorised(authorization):
+                raise HTTPException(
+                    status_code=401,
+                    detail={
+                        "error": {
+                            "message": "invalid api key",
+                            "type": "authentication_error",
+                        }
+                    },
+                )
+
+            agent_loop = self._loop_factory()
+            prompt = request.last_prompt()
+            session = request.session_key()
+
+            if request.stream:
+                return StreamingResponse(
+                    self._stream(agent_loop, session, prompt, request.model),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+
+            result = await agent_loop.run(session, prompt)
+            payload = ChatCompletionResponse(
+                id=f"chatcmpl-{uuid.uuid4().hex[:24]}",
+                created=int(time.time()),
+                model=request.model,
+                choices=[
+                    ChatCompletionChoice(
+                        message={"role": "assistant", "content": result.content},
+                        finish_reason=_finish_reason(result.stop_reason),
+                    )
+                ],
+                usage=ChatCompletionUsage(
+                    prompt_tokens=result.usage.input_tokens,
+                    completion_tokens=result.usage.output_tokens,
+                    total_tokens=result.usage.total_tokens,
+                ),
+            )
+            return JSONResponse(content=payload.model_dump())
+
+        return app
+
+    def _authorised(self, authorization: str | None) -> bool:
+        """Check the bearer token, but only when one is configured.
+
+        Bound to loopback with no token is a normal local setup; the check
+        exists for the case where the server is exposed deliberately.
         """
-        messages = _parse_messages(body.get("messages"))
-        if not messages:
-            raise _BadRequest("'messages' must be a non-empty array")
+        expected = self.config.api_key
+        if not expected:
+            return True
+        return authorization == f"Bearer {expected}"
 
-        session = body.get("user") or body.get("session") or "api:default"
-        prompt = messages[-1]["content"]
-
-        agent_loop = self._loop_factory()
-
-        if stream:
-            return self._stream_response(agent_loop, session, prompt)
-        return self._blocking_response(agent_loop, session, prompt)
-
-    def _blocking_response(self, agent_loop, session: str, prompt: str) -> dict[str, Any]:
-        result = asyncio.run(agent_loop.run(session, prompt))
-        return {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": body_model(),
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": result.content},
-                    "finish_reason": _finish_reason(result.stop_reason),
-                }
-            ],
-            "usage": {
-                "prompt_tokens": result.usage.input_tokens,
-                "completion_tokens": result.usage.output_tokens,
-                "total_tokens": result.usage.total_tokens,
-            },
-        }
-
-    def _stream_response(self, agent_loop, session: str, prompt: str):
+    async def _stream(
+        self,
+        agent_loop: Any,
+        session: str,
+        prompt: str,
+        model: str,
+    ) -> AsyncIterator[str]:
         """Yield SSE chunks as the reply arrives.
 
-        The handler runs on a request thread, not the thread that owns an event
-        loop, so this drives a loop of its own. Fragments are forwarded with
-        ``call_soon_threadsafe`` as the provider produces them, then the loop is
-        stepped until the agent finishes, draining whatever it queued.
+        Running on the request's own event loop is the point of the rewrite:
+        the previous implementation had to spin up a private loop and poll it,
+        because the agent was driven from a worker thread. Here the agent, the
+        provider, and the response share one loop, so a fragment is forwarded
+        the moment it is produced.
+
+        The queue exists only because the provider's ``on_delta`` callback is
+        synchronous while the response is a coroutine; a ``call_soon`` hop
+        hands each fragment over without blocking the loop.
         """
-        loop = asyncio.new_event_loop()
-        queue: asyncio.Queue = asyncio.Queue()
+        from vela.core.runner import StreamingEmitter
+
         completion_id = uuid.uuid4().hex[:24]
-        model = body_model()
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
 
-        def offer(chunk: str) -> None:
-            # The producer coroutine and this generator share the loop, so a
-            # direct put is safe; the threadsafe path is only needed because the
-            # agent may also be driven from elsewhere.
-            queue.put_nowait(chunk)
+        def on_text(delta: str) -> None:
+            loop.call_soon(queue.put_nowait, _sse_chunk(completion_id, model, delta))
 
-        async def drive() -> None:
-            from vela.core.runner import StreamingEmitter
+        emitter = StreamingEmitter(on_text=on_text)
+        task = asyncio.create_task(agent_loop.run(session, prompt, emitter=emitter))
 
-            def on_text(delta: str) -> None:
-                offer(_sse_chunk(completion_id, model, delta))
-
-            try:
-                await agent_loop.run(session, prompt, emitter=StreamingEmitter(on_text=on_text))
-            except Exception as exc:  # noqa: BLE001 - reported to the client
-                offer(_sse_chunk(completion_id, model, "", error=str(exc)))
-            finally:
-                offer("")
-
-        try:
-            task = loop.create_task(drive())
-            # Step the loop, forwarding fragments, until the agent signals done.
-            while not task.done():
-                loop.run_until_complete(asyncio.sleep(0))
-                while not queue.empty():
-                    chunk = queue.get_nowait()
-                    if chunk:
-                        yield chunk
-            # Drain anything queued on the final iteration.
-            loop.run_until_complete(asyncio.sleep(0))
+        # Forward whatever has been produced, and keep forwarding until the
+        # turn is done. The task and the generator share the loop, so awaiting
+        # the queue is what lets the provider make progress.
+        while True:
+            getter = asyncio.ensure_future(queue.get())
+            finished, _pending = await asyncio.wait(
+                {getter, task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if getter in finished:
+                chunk = getter.result()
+                if chunk:
+                    yield chunk
+                continue
+            # The turn finished; drain anything still queued, then stop.
+            getter.cancel()
             while not queue.empty():
                 chunk = queue.get_nowait()
                 if chunk:
                     yield chunk
-        finally:
-            loop.close()
+            break
 
         yield _sse_chunk(completion_id, model, "", finish_reason="stop")
-
-    def handle_models(self) -> dict[str, Any]:
-        return {"object": "list", "data": [{"id": body_model(), "object": "model"}]}
-
-    def metrics_text(self) -> str:
-        return self.metrics.to_prometheus()
+        # The terminating marker. OpenAI clients wait for it to know the stream
+        # ended cleanly, so a stream that ends without it looks truncated.
+        yield "data: [DONE]\n\n"
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def serve_forever(self) -> None:
-        server = ThreadingHTTPServer((self.config.host, self.config.port), _Handler)
-        server.vela = self  # type: ignore[attr-defined]
-        self._httpd = server
-        logger.info(
-            "listening on http://%s:%d (POST /v1/chat/completions)",
-            self.config.host,
-            self.config.port,
+        """Run the server until interrupted."""
+        import uvicorn
+
+        uvicorn.run(
+            self.app,
+            host=self.config.host,
+            port=self.config.port,
+            log_level="info",
         )
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            server.shutdown()
-            server.server_close()
-
-
-def body_model() -> str:
-    return "vela"
-
-
-def _sse_chunk(
-    completion_id: str,
-    model: str,
-    delta: str,
-    *,
-    finish_reason: str | None = None,
-    error: str = "",
-) -> str:
-    """Render one OpenAI-compatible streaming chunk.
-
-    Shaped like the non-streaming response so a client can accumulate deltas
-    without branching on which mode it asked for.
-    """
-    payload: dict[str, Any] = {
-        "id": f"chatcmpl-{completion_id}",
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [
-            {"index": 0, "delta": {"content": delta} if delta else {}, "finish_reason": finish_reason}
-        ],
-    }
-    if error:
-        payload["error"] = {"message": error, "type": "internal_error"}
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
-class _BadRequest(ValueError):
-    """A client error, mapped to 400."""
-
-
-# --------------------------------------------------------------------------
-# Message parsing
-# --------------------------------------------------------------------------
-
-
-def _parse_messages(raw: Any) -> list[dict[str, str]]:
-    """Accept both the OpenAI message array and a bare string prompt."""
-    if isinstance(raw, str):
-        return [{"role": "user", "content": raw}]
-    if not isinstance(raw, list):
-        raise _BadRequest("'messages' must be an array or a string")
-
-    messages: list[dict[str, str]] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            raise _BadRequest("each message must be an object")
-        role = item.get("role")
-        content = item.get("content")
-        if role not in {"system", "user", "assistant"}:
-            raise _BadRequest(f"unsupported role: {role!r}")
-        # Content may arrive as a list of blocks, which OpenAI permits for
-        # multimodal input. Flatten the text parts rather than rejecting.
-        if isinstance(content, list):
-            parts = [
-                block.get("text", "")
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
-            ]
-            content = "".join(parts)
-        if not isinstance(content, str):
-            raise _BadRequest(f"message {role!r} must have string or block content")
-        messages.append({"role": role, "content": content})
-    return messages
-
-
-def _finish_reason(stop_reason: str) -> str:
-    """Map the internal stop reason onto the OpenAI vocabulary."""
-    return {
-        "completed": "stop",
-        "max_iterations": "length",
-        "empty_final_response": "stop",
-        "error": "stop",
-        "cancelled": "stop",
-    }.get(stop_reason, "stop")
-
-
-def _sse(payload: dict[str, Any]) -> str:
-    body = json.dumps(payload, ensure_ascii=False)
-    return f"data: {body}\n\n"
-
-
-# --------------------------------------------------------------------------
-# HTTP plumbing
-# --------------------------------------------------------------------------
-
-
-class _Handler(BaseHTTPRequestHandler):
-    """Maps HTTP onto the runtime. Kept thin on purpose."""
-
-    protocol_version = "HTTP/1.1"
-    server_version = "Vela/0.4"
-
-    @property
-    def vela(self) -> VelaServer:
-        return self.server.vela  # type: ignore[attr-defined]
-
-    def log_message(self, fmt: str, *args: Any) -> None:
-        # Route through logging rather than stderr so it lands wherever the
-        # application's logs are configured to go.
-        logger.debug("%s - %s", self.address_string(), fmt % args)
-
-    # -- responses --------------------------------------------------
-
-    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _send_text(self, status: int, text: str, content_type: str = "text/plain") -> None:
-        body = text.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _authorised(self) -> bool:
-        """Check the bearer token, but only when one is configured.
-
-        Bound to loopback with no token is a normal local setup; the check
-        exists for the case where the server is exposed deliberately.
-        """
-        expected = self.vela.config.api_key
-        if not expected:
-            return True
-        header = self.headers.get("Authorization", "")
-        return header == f"Bearer {expected}"
-
-    def _read_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_BODY_BYTES:
-            raise _BadRequest("request body too large")
-        if length <= 0:
-            raise _BadRequest("empty request body")
-        try:
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-        except json.JSONDecodeError as exc:
-            raise _BadRequest(f"invalid JSON: {exc}") from exc
-        if not isinstance(payload, dict):
-            raise _BadRequest("request body must be a JSON object")
-        return payload
-
-    # -- routes -----------------------------------------------------
-
-    def do_GET(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
-        path = self.path.split("?", 1)[0]
-        if path in {"/health", "/healthz"}:
-            self._send_json(HTTPStatus.OK, {"status": "ok", "inflight": self.vela.inflight})
-            return
-        if path == "/metrics":
-            self._send_text(HTTPStatus.OK, self.vela.metrics_text(), "text/plain")
-            return
-        if path == "/v1/models":
-            self._send_json(HTTPStatus.OK, self.vela.handle_models())
-            return
-        self._send_json(HTTPStatus.NOT_FOUND, _error("unknown endpoint", "not_found_error"))
-
-    def do_POST(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0]
-        if path != "/v1/chat/completions":
-            self._send_json(HTTPStatus.NOT_FOUND, _error("unknown endpoint", "not_found_error"))
-            return
-
-        if not self._authorised():
-            self._send_json(
-                HTTPStatus.UNAUTHORIZED, _error("invalid api key", "authentication_error")
-            )
-            return
-
-        try:
-            body = self._read_body()
-            self.vela.inflight += 1
-            try:
-                result = self.vela.handle_chat(body, stream=bool(body.get("stream")))
-            finally:
-                self.vela.inflight -= 1
-        except _BadRequest as exc:
-            self._send_json(HTTPStatus.BAD_REQUEST, _error(str(exc), "invalid_request_error"))
-            return
-        except Exception as exc:  # noqa: BLE001 - boundary
-            logger.exception("request failed")
-            self._send_json(
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                _error(f"{type(exc).__name__}: {exc}", "internal_error"),
-            )
-            return
-
-        if isinstance(result, str):
-            self._send_json(HTTPStatus.OK, json.loads(result))
-            return
-        if isinstance(result, dict):
-            self._send_json(HTTPStatus.OK, result)
-            return
-
-        # Iterator: stream it as server-sent events.
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        for chunk in result:
-            self.wfile.write(chunk.encode("utf-8"))
-            self.wfile.flush()
-        self.wfile.write(b"data: [DONE]\n\n")
-        self.wfile.flush()
-
-
-def _error(message: str, kind: str) -> dict[str, Any]:
-    return {"error": {"message": message, "type": kind}}
 
 
 def build_default_server(
     *,
     api_key: str,
     model: str,
+    backend: str = "openai",
     host: str = "127.0.0.1",
     port: int = 8080,
     workspace: str = ".",
@@ -431,19 +425,27 @@ def build_default_server(
     """
     from vela.core.loop import build_default_loop
 
-    def factory():
-        return build_default_loop(
-            backend=api_key.get("_backend", "openai") if isinstance(api_key, dict) else "openai",
-            api_key=None if isinstance(api_key, dict) else api_key,
+    instrumentor = Instrumentor()
+
+    def factory() -> Any:
+        loop = build_default_loop(
+            backend=backend,
+            api_key=api_key,
             model=model,
             root=root,
             workspace=workspace,
             system=system,
         )
+        # Share the server's collector with the runtime, so one scrape covers
+        # the whole request rather than only part of it.
+        loop.instrumentor = instrumentor
+        loop._runner.instrumentor = instrumentor  # noqa: SLF001
+        return loop
 
     return VelaServer(
         factory,
         ServerConfig(host=host, port=port, api_key=auth_token),
         workspace=workspace,
         system=system,
+        instrumentor=instrumentor,
     )

@@ -224,8 +224,23 @@ curl localhost:8080/health      # 存活与在途请求数
 curl localhost:8080/metrics     # Prometheus 格式
 ```
 
-用标准库而非 Web 框架实现：三个端点而已，框架带来的概念比省下的多，
-而整个项目最在意的就是「小到能读完」。
+基于 FastAPI 实现，请求体校验、SSE 分帧、OpenAPI 文档均由框架提供，
+无需手写。FastAPI 是**可选依赖**——核心运行时与 CLI 不依赖它：
+
+```bash
+pip install vela              # 核心，仅 httpx 一个依赖
+pip install 'vela[server]'    # 追加 FastAPI + uvicorn
+```
+
+`vela.server` 在缺少 FastAPI 时会给出明确提示，`import vela` 始终可用。
+这个保证有测试守着：CI 里会屏蔽 web 相关包的导入，确认核心仍能工作。
+
+启动后自带交互式 API 文档：
+
+```
+GET /docs          Swagger UI，可直接试请求
+GET /openapi.json  OpenAPI 3.1 schema
+```
 
 ## 可观测性
 
@@ -355,7 +370,7 @@ src/vela/
     └── builtin.py       内置工具
 
 ├── observability.py     指标 + span 追踪（零依赖，Prometheus 格式输出）
-├── server.py            HTTP 服务（标准库实现，OpenAI 兼容接口）
+├── server.py            HTTP 服务（FastAPI，OpenAI 兼容接口 + OpenAPI 文档）
 └── cli.py               vela serve / chat / verify / providers
 
 tests/                   239 个测试
@@ -412,6 +427,7 @@ tests/test_providers_tools.py   解析、错误分类、schema（29）
 - HTTP 服务为标准库实现，未做连接数限制与背压
 - 压缩阈值为字符/token 估算，未接精确 tokenizer
 - OpenAI 兼容后端的缓存由服务端自动管理，未做请求路由优化
+- HTTP 服务未做连接数限制与背压；FastAPI 为可选依赖，未安装时该模块不可用
 - 缓存断点为静态规划，未实现基于实际命中率的动态调整
 - 同步接口，未做背压与限流
 

@@ -41,7 +41,6 @@ from vela.providers.factory import (
     create_provider,
 )
 from vela.providers.openai_compat import OpenAICompatProvider
-from vela.server import ServerConfig, VelaServer
 from vela.tools.base import FunctionTool, Tool, tool
 from vela.tools.registry import ToolRegistry
 
@@ -70,7 +69,6 @@ __all__ = [
     "RateLimitError",
     "RunResult",
     "RunSpec",
-    "ServerConfig",
     "Session",
     "SessionStore",
     "StreamingEmitter",
@@ -80,7 +78,6 @@ __all__ = [
     "ToolRegistry",
     "ToolResult",
     "TransientError",
-    "VelaServer",
     "UnknownProviderError",
     "available_providers",
     "create_provider",
@@ -89,3 +86,17 @@ __all__ = [
     "build_default_loop",
     "tool",
 ]
+
+def __getattr__(name: str):
+    """Expose the server types without importing FastAPI eagerly.
+
+    FastAPI is an optional dependency, so importing it at module load would
+    make ``import vela`` fail for anyone who installed the core package
+    alone. The names are resolved on first access instead, and only then does
+    the extra need to be present.
+    """
+    if name in {"VelaServer", "ServerConfig"}:
+        from vela import server as _server
+
+        return getattr(_server, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

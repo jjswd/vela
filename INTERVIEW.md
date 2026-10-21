@@ -9,6 +9,7 @@ Numbers below are measured from this codebase, not estimated.
 > execution, absorbs two LLM wire protocols behind one provider contract, and
 > treats model output as untrusted input — every recovery path is bounded.
 > Exposed as a library, an OpenAI-compatible HTTP service, and a CLI.
+> The web layer is an optional dependency, so the core stays at one.
 
 ## Scale to quote accurately
 
@@ -18,7 +19,7 @@ Numbers below are measured from this codebase, not estimated.
 | Tests | 217 across 10 files (~3,650 lines) |
 | Offline checks | 46, no API key required |
 | Providers | 2 protocols, 6 registered backends |
-| Interfaces | Python API, OpenAI-compatible HTTP, CLI |
+| Interfaces | Python API, OpenAI-compatible HTTP (FastAPI), CLI |
 | Python | 3.11 – 3.13 (CI matrix) |
 
 Quote these exactly: about 4,800 lines of source, 217 test cases, 46 offline checks,
@@ -147,6 +148,20 @@ healthy while the model is degrading.
 
 Label values are capped and collapse into `other`, per metric and label name, so
 a high-cardinality series cannot starve the rest.
+
+### Why FastAPI, and what did it change?
+
+FastAPI is what a Python service is expected to use, and it removed three
+things I had written by hand: request validation, SSE framing, and running the
+agent on the event loop. That last one was the real win. The standard-library
+server was thread-based, so the agent had to run on a private event loop that
+the handler polled with `sleep(0)`. Under ASGI the agent, the provider, and the
+response share one loop, and a fragment is forwarded the moment it exists.
+
+I kept it optional. The core package stays at one dependency, `import vela`
+never touches the web stack, and a test blocks those imports to prove it. CI
+runs the same check, because an optional dependency that quietly becomes
+required is worse than no split at all.
 
 ### What did you find when you added an HTTP server?
 

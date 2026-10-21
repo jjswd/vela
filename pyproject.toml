@@ -6,7 +6,18 @@ requires-python = ">=3.11"
 dependencies = ["httpx>=0.27"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6", "build>=1.2"]
+# The web surface is optional: the core runtime and the CLI work without it.
+# Keeping FastAPI out of the base install means the library stays light for
+# anyone embedding it in something else.
+server = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.24",
+  "ruff>=0.6",
+  "build>=1.2",
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+]
 
 [project.scripts]
 vela = "vela.cli:main"

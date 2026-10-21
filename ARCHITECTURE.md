@@ -178,11 +178,33 @@ Where a bug could hide behind convenient mocks, the mock was made harder. An
 earlier version returned whole response bodies at once, which meant the
 incremental reader's buffering path was never executed.
 
+## The web layer
+
+FastAPI, as an optional dependency. The core runtime does not import it, so
+`pip install vela` pulls in one dependency and `pip install vela[server]` adds
+the web surface. A test blocks the web packages from importing and checks the
+core still works; CI runs the same check.
+
+What the framework replaced:
+
+- Request validation, previously hand-written and returning 400 with a
+  hand-shaped error body, is now declared on Pydantic models and rejected with
+  422 by the framework.
+- SSE framing, previously assembled by hand, is a `StreamingResponse` over an
+  async generator.
+- The agent used to run on a private event loop spun up inside the request
+  thread, polled with `sleep(0)`, because the standard-library server was
+  thread-based. Under ASGI the agent, the provider, and the response share one
+  loop, so a fragment is forwarded the moment it is produced.
+
+The OpenAI-compatible shape is unchanged, and `/docs` now serves an
+interactive API page, which answers "how do I call this?" better than prose.
+
 ## Known limits
 
-- Single process; sessions are JSON files with no cross-process locking.
+- Single process; sessions are JSON files guarded by an in-process lock.
 - Compaction thresholds use a character-per-token estimate, not an exact
   tokenizer.
 - Only the OpenAI-compatible and Anthropic protocols are implemented.
 - Caching markers are placed statically, not adapted from observed hit rates.
-- No concurrency limit or backpressure across sessions.
+- No connection limit or backpressure in the HTTP server.
