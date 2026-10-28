@@ -103,18 +103,56 @@ def test_estimate_savings_is_zero_for_a_single_turn() -> None:
 
 
 def test_stats_show_a_saving_on_repeat_use() -> None:
-    """Model a realistic shape: a large stable prefix, small changing tail."""
+    """Model a realistic shape: a large stable prefix, small changing tail.
+
+    The shape follows Anthropic's own usage semantics: a cache write reports
+    the written tokens in ``cache_creation_input_tokens``, a read reports them
+    in ``cache_read_input_tokens``, and ``input_tokens`` counts only what came
+    after the last breakpoint. So a ten-turn session over a 9,000-token prefix
+    with a 1,000-token tail produces one write of 9,000, nine reads of 9,000,
+    and 10,000 fresh tokens.
+    """
     stats = CacheStats()
-    # First turn writes the cache; later turns read it. The uncached input is
-    # the changing tail only -- the cached prefix is billed separately.
+    # First turn writes the cache; later turns read it.
     stats.record(read=0, write=9_000, input_tokens=1_000)
     for _ in range(9):
         stats.record(read=9_000, write=0, input_tokens=1_000)
 
-    assert stats.hit_rate > 0.85
-    # Hand-checked: writes 9000*1.25 + reads 81000*0.1 + fresh 10000, against a
-    # baseline of 100000 full-price tokens, gives 0.2935.
+    # Total input is 100,000 tokens, of which 81,000 came from a cache.
+    assert stats.total_input_tokens == 100_000
+    assert stats.hit_rate == pytest.approx(0.81, abs=0.001)
+    # Hand-checked: writes 9000*1.25 + reads 81000*0.1 + fresh 10000 = 29350,
+    # against a baseline of 100000 full-price tokens.
     assert stats.effective_cost_ratio == pytest.approx(0.2935, abs=0.001)
+
+
+def test_hit_rate_counts_written_tokens_as_not_a_hit() -> None:
+    """A write is not a hit.
+
+    The tokens stored into the cache on the first request were not served from
+    one, so counting them as hits would overstate the rate. The cost ratio
+    stays the metric that answers whether the policy paid off.
+    """
+    stats = CacheStats()
+    stats.record(read=0, write=9_000, input_tokens=1_000)
+    assert stats.hit_rate == 0.0
+    assert stats.total_input_tokens == 10_000
+
+    for _ in range(9):
+        stats.record(read=9_000, write=0, input_tokens=1_000)
+    # 81,000 reads out of 100,000 total input tokens.
+    assert stats.hit_rate == pytest.approx(0.81, abs=0.001)
+
+
+def test_total_input_matches_anthropics_definition() -> None:
+    """The three usage fields add up to the total input.
+
+    Stated in Anthropic's documentation as
+    ``cache_read_input_tokens + cache_creation_input_tokens + input_tokens``.
+    """
+    stats = CacheStats()
+    stats.record(read=40_000, write=10_000, input_tokens=500)
+    assert stats.total_input_tokens == 50_500
 
 
 def test_stats_show_a_loss_when_the_cache_is_never_reused() -> None:
@@ -345,7 +383,9 @@ async def test_cache_stats_accumulate_across_turns() -> None:
     # Five reads at 0.1x repay the 1.25x write several times over, leaving the
     # uncached tail to dominate the bill.
     assert summary["cost_ratio"] < 0.4
-    assert summary["hit_rate"] > 0.85
+    # 47,500 reads out of 63,000 total input tokens. The written tokens are in
+    # the denominator but not the numerator: a write is not a hit.
+    assert summary["hit_rate"] == pytest.approx(0.754, abs=0.002)
 
 
 async def test_usage_carries_cache_fields_to_the_caller() -> None:

@@ -122,13 +122,31 @@ class CacheStats:
         self.fresh_input_tokens += input_tokens
 
     @property
-    def hit_rate(self) -> float:
-        """Share of total input tokens served from cache.
+    def total_input_tokens(self) -> int:
+        """Every input token the model saw, cached or not.
 
-        The denominator is every input token the model saw -- cached or not --
-        since that is what a hit actually saves work on.
+        Anthropic's own definition: the three usage fields add up to the
+        total input. ``cache_read_input_tokens`` plus
+        ``cache_creation_input_tokens`` plus ``input_tokens``.
         """
-        total = self.cache_read_tokens + self.fresh_input_tokens
+        return self.cache_read_tokens + self.cache_write_tokens + self.fresh_input_tokens
+
+    @property
+    def hit_rate(self) -> float:
+        """Share of total input tokens that were served from cache.
+
+        The denominator is every input token, including the ones written to
+        cache on the first request. Those were not served from a cache -- they
+        were stored into one, at a premium -- so counting them as hits would
+        flatter the number.
+
+        A consequence worth knowing: the first request of any session always
+        drags the rate down, so a short session can show a low hit rate while
+        still saving money. The cost ratio is the metric that answers "did
+        this pay off"; the hit rate answers "how much of the traffic was
+        cached".
+        """
+        total = self.total_input_tokens
         return self.cache_read_tokens / total if total else 0.0
 
     @property
@@ -143,9 +161,7 @@ class CacheStats:
         sent and paid for. Leaving them out would make the write look free and
         overstate the saving.
         """
-        baseline_tokens = (
-            self.fresh_input_tokens + self.cache_read_tokens + self.cache_write_tokens
-        )
+        baseline_tokens = self.total_input_tokens
         if baseline_tokens == 0:
             return 1.0
         with_cache = (

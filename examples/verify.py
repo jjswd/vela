@@ -19,8 +19,12 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# The benchmark lives beside this script; importing it keeps the figure quoted
+# in the README tied to the code that produces it.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import httpx
+from cache_benchmark import benchmark as run_cache_benchmark
 
 from vela import (
     AgentLoop,
@@ -325,8 +329,44 @@ async def verify_caching() -> None:
     stats.record(read=0, write=9000, input_tokens=1000)
     for _ in range(9):
         stats.record(read=9000, write=0, input_tokens=1000)
-    check("hit rate above 85%", stats.hit_rate > 0.85, f"{stats.hit_rate:.1%}")
-    check("cost ratio below 0.35", stats.effective_cost_ratio < 0.35, f"{stats.effective_cost_ratio:.3f}")
+    # 81,000 reads out of 100,000 total input tokens. A write is not a hit,
+    # so the tokens stored on the first turn are in the denominator only.
+    check(
+        "hit rate is 81%",
+        abs(stats.hit_rate - 0.81) < 0.001,
+        f"{stats.hit_rate:.1%}",
+    )
+    check(
+        "input cost drops to 29%",
+        abs(stats.effective_cost_ratio - 0.2935) < 0.001,
+        f"{stats.effective_cost_ratio:.1%}",
+    )
+    check(
+        "cost ratio below 0.35",
+        stats.effective_cost_ratio < 0.35,
+        f"{stats.effective_cost_ratio:.3f}",
+    )
+
+    # The end-to-end path: the same numbers through a provider and a simulated
+    # backend, so the figure quoted in the README cannot drift away from what
+    # the code actually does.
+    section("9b. End-to-end cache benchmark")
+    benchmark = await run_cache_benchmark()
+    check(
+        "benchmark hit rate is 81%",
+        abs(benchmark["hit_rate"] - 0.81) < 0.01,
+        f"{benchmark['hit_rate']:.1%}",
+    )
+    check(
+        "benchmark cost ratio is 0.293",
+        abs(benchmark["cost_ratio"] - 0.293) < 0.01,
+        f"{benchmark['cost_ratio']:.3f}",
+    )
+    check(
+        "benchmark reduces input cost by 70.7%",
+        abs((1 - benchmark["cost_ratio"]) * 100 - 70.7) < 0.5,
+        f"{(1 - benchmark['cost_ratio']) * 100:.1f}%",
+    )
 
     section("10. Cache markers only on stable prefixes")
     provider = AnthropicProvider(

@@ -95,17 +95,6 @@ def _in_test_tree(path: str) -> bool:
     return any(part in TEST_PATH_MARKERS for part in parts[:-1])
 
 
-#: Test fixtures legitimately contain credentials-shaped strings: they exist to
-#: prove the scanner works. Reporting them is noise that trains a reader to skip
-#: the critical section, so files under a test directory are matched with a
-#: lower severity rather than dropped -- the pattern may still matter there.
-TEST_PATH_MARKERS = frozenset({"tests", "test", "testing", "testdata", "fixtures"})
-
-
-def _in_test_tree(path: str) -> bool:
-    parts = path.replace("\\", "/").split("/")
-    return any(part in TEST_PATH_MARKERS for part in parts[:-1])
-
 
 #: File paths referenced inside documentation. The leading character class
 #: includes the dot so that dotted module paths ("import src.missing") yield
@@ -606,16 +595,6 @@ def _module_name(path: str) -> str:
     normalised = path.replace("\\", "/").replace(".py", "")
     return normalised.replace("/", ".")
 
-
-def _module_name(path: str) -> str:
-    """Convert a repository-relative file path into an importable module name.
-
-    Windows separators have to be handled alongside POSIX ones, otherwise the
-    vertex identifiers silently stop matching the dotted names collected from
-    the imports.
-    """
-    normalised = path.replace("\\", "/").replace(".py", "")
-    return normalised.replace("/", ".")
 
 
 def _find_cycles(graph: dict[str, set[str]], modules: list[str]) -> list[list[str]]:

@@ -239,8 +239,13 @@ print(loop.provider.cache_stats.summary())
 # {'turns': 10, 'cache_read_tokens': 81000, 'hit_rate': 0.81, 'cost_ratio': 0.352}
 ```
 
-实测（模拟稳定前缀 9000 token + 变动尾部 1000 token，共 10 轮）：
-**输入 token 成本降低 64.8%，缓存命中率 81%**。
+实测（`examples/cache_benchmark.py`，稳定前缀 9000 token + 变动尾部 1000 token，
+共 10 轮）：**输入 token 成本降至无缓存时的 29.3%（降本 70.7%），缓存命中率 81%**。
+
+> 这组数字来自**模拟后端**：它按 Anthropic 的语义复现缓存命中与计费字段，
+> 验证的是「断点位置选得对不对」和「成本算得准不准」。换成真实 API 调用，
+> 后端换掉即可，其余代码不变。数字同时由 `examples/verify.py` 校验，
+> 不会与代码脱节。
 
 ### 缓存不是免费的
 
@@ -273,6 +278,28 @@ print(loop.provider.cache_stats.summary())
 
 `CacheStats` 记录真实的命中与写入并算出相对成本，`cost_ratio > 1.0`
 就说明写入溢价尚未回本——策略是否有效用事实检验，而不是相信配置。
+
+两个指标的口径都按 Anthropic 的定义来：
+
+```
+total_input_tokens = cache_read_input_tokens + cache_creation_input_tokens + input_tokens
+```
+
+**命中率**的分子是 `cache_read`、分母是全部输入 token。注意**写入缓存的那批
+token 不算命中**——它们被存进去，不是从缓存里取出来的。分母含它们，是因为
+它们确实被模型消费了。首次请求必然拉低命中率，这是正常的；判断"值不值"
+要看成本比，不是命中率。
+
+两个指标的口径都按 Anthropic 的定义来：
+
+```
+total_input_tokens = cache_read_input_tokens + cache_creation_input_tokens + input_tokens
+```
+
+**命中率**的分子是 `cache_read`、分母是全部输入 token。注意**写入缓存的那批
+token 不算命中**——它们被存进去，不是从缓存里取出来的。分母含它们，是因为
+它们确实被模型消费了。首次请求必然拉低命中率，这是正常的；判断"值不值"
+要看成本比，不是命中率。
 
 ## HTTP 服务
 

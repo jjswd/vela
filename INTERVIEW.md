@@ -122,7 +122,10 @@ invalidates everything before it, which means rewriting the cache on every
 request for no benefit. The API also caps breakpoints at four.
 
 Measured on a 10-turn session with a 9,000-token stable prefix and a 1,000-token
-changing tail: 81% hit rate and input cost at 0.29× the uncached baseline.
+changing tail: 81% hit rate and input cost at 0.293× the uncached baseline,
+a 70.7% reduction. The figure comes from a simulated backend that mirrors
+Anthropic's usage semantics, and `examples/verify.py` re-checks it, so the
+number cannot drift away from the code.
 
 ### How do you know caching is worth it in practice?
 
