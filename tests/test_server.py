@@ -216,10 +216,42 @@ def test_unknown_role_is_rejected(client) -> None:
 
 
 def test_empty_content_is_rejected(client) -> None:
+    """Whitespace-only content is not content.
+
+    A validator on a union field is easy to write in a way that never runs:
+    with the decorators in the wrong order Pydantic does not register it, and
+    the field is then accepted without complaint. This assertion is what
+    notices that.
+    """
     response = client.post(
         "/v1/chat/completions", json={"messages": [{"role": "user", "content": "   "}]}
     )
     assert response.status_code == 422
+
+
+def test_empty_content_list_is_rejected(client) -> None:
+    response = client.post(
+        "/v1/chat/completions", json={"messages": [{"role": "user", "content": []}]}
+    )
+    assert response.status_code == 422
+
+
+def test_the_content_validator_is_actually_registered() -> None:
+    """Guard the decorator order directly.
+
+    ``@field_validator`` has to wrap ``@classmethod``. Reversed, Pydantic
+    accepts the field silently and the server answers blank prompts.
+    """
+    from pydantic import ValidationError
+
+    from vela.server import ChatMessage
+
+    with pytest.raises(ValidationError):
+        ChatMessage(role="user", content="   ")
+    with pytest.raises(ValidationError):
+        ChatMessage(role="user", content=[])
+    # A valid message still passes.
+    assert ChatMessage(role="user", content="hello").text() == "hello"
 
 
 def test_malformed_body_is_rejected(client) -> None:

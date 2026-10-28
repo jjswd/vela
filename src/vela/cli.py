@@ -25,6 +25,7 @@ usage:
   vela chat <message>         one-shot completion, non-interactive
   vela verify                 run the offline checks
   vela providers              list registered backends
+  vela doctor                 check this environment
 
 serve options:
   --backend NAME       provider backend (default: openai)
@@ -199,6 +200,115 @@ def cmd_providers(_args: list[str]) -> int:
     return 0
 
 
+def cmd_doctor(_args: list[str]) -> int:
+    """Report whether this environment is set up correctly.
+
+    The most common way to lose time with a CLI is not knowing which of three
+    things is wrong: the interpreter, the installed package, or the PATH. This
+    checks all three and says which, because "command not found" without that
+    context is a guess.
+    """
+    import importlib.util
+    import shutil
+
+    problems: list[str] = []
+    notes: list[str] = []
+
+    print("vela doctor")
+    print("=" * 60)
+
+    # 1. Which interpreter is running.
+    print(f"python      {sys.executable}")
+    print(f"version     {sys.version.split()[0]}")
+    if sys.version_info < (3, 11):  # noqa: UP036
+        # The package metadata already requires 3.11, so pip would refuse the
+        # install. This catches the case the metadata cannot: someone running
+        # from a source checkout on an older interpreter, which is exactly the
+        # situation a doctor command is meant to explain.
+        problems.append(
+            f"Python 3.11 or newer is required; this is {sys.version_info.major}."
+            f"{sys.version_info.minor}."
+        )
+
+    # 2. Is the package importable, and from where.
+    spec = importlib.util.find_spec("vela")
+    if spec is None:
+        problems.append(
+            "the vela package is not importable in this environment. "
+            "Install it with: pip install -e '.[dev,server]'  "
+            "(or 'uv pip install -e \".[dev,server]\"' in a uv environment)"
+        )
+        location = "(not found)"
+    else:
+        location = spec.origin or "(namespace package)"
+        print(f"vela        {location}")
+        # An editable install points into the source tree, which is what
+        # someone working on the project wants; a site-packages copy is what a
+        # user of the published package wants. Neither is wrong, but the
+        # difference explains "my edits are not taking effect".
+        if "site-packages" in (location or ""):
+            notes.append(
+                "vela is installed as a copy, not an editable install. "
+                "Use 'pip install -e .' if you are working on the source."
+            )
+        elif "src" in (location or ""):
+            notes.append("vela is an editable install, so source edits apply immediately.")
+
+    # 3. Is the command itself reachable.
+    executable = shutil.which("vela")
+    if executable:
+        print(f"command     {executable}")
+    else:
+        problems.append(
+            "the 'vela' command is not on PATH. Activate the environment "
+            "(.venv\\Scripts\\Activate.ps1) or run the module directly: "
+            "python -m vela.cli"
+        )
+
+    # 4. Optional pieces.
+    for module, label, extra in (
+        ("fastapi", "fastapi", "vela[server]"),
+        ("uvicorn", "uvicorn", "vela[server]"),
+    ):
+        if importlib.util.find_spec(module) is None:
+            notes.append(f"{label} is not installed; 'vela serve' needs it. Install {extra}.")
+        else:
+            print(f"{label:<11} installed")
+
+    # 5. Credentials, reported without printing them.
+    backend = _env("VELA_BACKEND", "openai")
+    if _env("ANTHROPIC_API_KEY") or _env("OPENAI_API_KEY") or _env("VELA_API_KEY"):
+        print(f"credential  present (backend default: {backend})")
+    else:
+        notes.append(
+            "no API key found. 'vela chat' and 'vela serve' need one; "
+            "'vela verify' and 'vela providers' do not."
+        )
+
+    # An explicit blank line before the sections, so the output does not run
+    # into the last check. A bare newline inside the string is avoided on
+    # purpose: some Windows shells concatenate output that arrives with a
+    # line feed only.
+    print()
+    if notes:
+        print("notes")
+        print("-" * 60)
+        for note in notes:
+            print(f"  - {note}")
+
+    if problems:
+        print()
+        print("problems")
+        print("-" * 60)
+        for problem in problems:
+            print(f"  ! {problem}")
+        return 1
+
+    print()
+    print("no problems found.")
+    return 0
+
+
 def cmd_verify(_args: list[str]) -> int:
     """Delegate to the offline checks so `vela verify` matches the script."""
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -254,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
         "chat": cmd_chat,
         "providers": cmd_providers,
         "verify": cmd_verify,
+        "doctor": cmd_doctor,
     }
     handler = handlers.get(command)
     if handler is None:

@@ -33,10 +33,82 @@ Provider/Tool  面向后端：模型协议与工具能力
 依赖只能向下。`core` 不认识 transport，`providers` 不认识会话。
 这条约束让「换模型」不影响路由，「换接入方式」不影响模型循环。
 
+## 安装
+
+```bash
+pip install -e ".[dev,server]"   # 开发环境（含 FastAPI 与测试工具）
+pip install -e ".[server]"       # 只装 web 层
+pip install -e .                 # 只装核心（仅 httpx 一个依赖）
+```
+
+装完就有 `vela` 命令：
+
+```bash
+vela --help
+vela providers        # 列出可用后端
+vela verify           # 跑 46 项离线检查，无需 API key
+vela doctor           # 检查当前环境是否配置正确
+vela serve            # 启动 HTTP 服务
+vela chat "你好"      # 命令行单次对话
+```
+
+### 遇到「无法将"vela"项识别为 cmdlet、函数、脚本文件或可运行程序」
+
+意思是**当前环境里没有 `vela` 这个命令**。绝大多数情况是下面两种之一。
+
+**1. 包没装进你正在用的那个环境。** 装了依赖不等于装了包——只装
+`fastapi`/`uvicorn` 而没装 `vela` 本体，就不会生成 `vela.exe`。
+先确认：
+
+```bash
+python -c "import vela; print(vela.__file__)"
+pip show vela
+```
+
+没有的话补装：
+
+```bash
+# 用 pip 的环境
+pip install -e ".[dev,server]"
+
+# 用 uv 的环境：uv 建的虚拟环境默认不带 pip，
+# 所以在 uv 环境里执行 pip 会报 "No module named pip"
+uv pip install -e ".[dev,server]"
+```
+
+**2. 虚拟环境没激活，或者激活的不是装着 vela 的那个。**
+Windows 上 `venv\Scripts` 必须在 PATH 里，否则命令找不到：
+
+| Shell | 激活命令 |
+| --- | --- |
+| PowerShell | `.\.venv\Scripts\Activate.ps1` |
+| cmd | `.\.venv\Scripts\activate.bat` |
+| bash / git-bash | `source .venv/bin/activate` |
+
+激活后确认：
+
+```powershell
+Get-Command vela
+# 应输出类似：...\.venv\Scripts\vela.exe
+```
+
+**仍然找不到时的两个办法**：直接用完整路径
+`.\.venv\Scripts\vela.exe --help`，或者绕过命令直接跑模块
+`python -m vela.cli --help`。
+
+**或者直接问它**：
+
+```bash
+vela doctor
+```
+
+会一次说清当前环境的状态——用的是哪个解释器、vela 从哪里导入的、
+命令在不在 PATH 上、FastAPI 装了没有、有没有 API key。
+
 ## 快速开始
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,server]"
 
 # 无需 API key：脚本化 provider 跑通工具循环与全部恢复路径
 python examples/demo.py
@@ -51,7 +123,7 @@ python examples/demo.py
 export VELA_BACKEND=deepseek DEEPSEEK_API_KEY=sk-... VELA_MODEL=deepseek-chat
 
 python examples/verify.py   # 46 checks, no API key needed
-pytest -q                     # 239 passed
+pytest -q                     # 264 passed
 ```
 
 最小用法：

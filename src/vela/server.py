@@ -69,16 +69,29 @@ class ChatMessage(BaseModel):
     role: str = Field(pattern="^(system|user|assistant)$")
     content: str | list[dict[str, Any]]
 
-    @field_validator("content")
+    # The decorator order matters: field_validator has to wrap the classmethod,
+    # not the other way around. Reversed, Pydantic never registers the
+    # validator and the check below is silently inert.
+    @field_validator("content", mode="before")
     @classmethod
-    def _require_text(cls, value: str | list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+    def _require_text(cls, value: Any) -> Any:
+        """Reject content that carries no text at all.
+
+        The validator has to run in "before" mode. For a union type, Pydantic
+        validates against each member in turn, and an "after" validator on a
+        union is skipped when the matched member carries its own constraints.
+        That made this check silently inert: empty content was accepted and
+        the model was asked to answer a blank prompt.
+        """
         if isinstance(value, str):
             if not value.strip():
                 raise ValueError("message content must not be empty")
             return value
-        if not value:
-            raise ValueError("message content blocks must not be empty")
-        return value
+        if isinstance(value, list):
+            if not value:
+                raise ValueError("message content blocks must not be empty")
+            return value
+        raise ValueError("message content must be a string or a list of blocks")
 
     def text(self) -> str:
         """The text this message contributes to the transcript."""
